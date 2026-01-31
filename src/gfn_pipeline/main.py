@@ -25,10 +25,8 @@ import json
 import logging
 import os
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from dotenv import load_dotenv
 
@@ -56,7 +54,7 @@ logger = logging.getLogger("gfn_pipeline")
 
 class PipelineRunner:
     """Main pipeline orchestrator supporting multiple destinations."""
-    
+
     def __init__(
         self,
         destination: str = "duckdb",
@@ -80,12 +78,12 @@ class PipelineRunner:
             "record_types": [],
             "errors": [],
         }
-    
+
     def run(self) -> dict:
         """Execute the full pipeline."""
         self.metrics["start_time"] = datetime.now(timezone.utc).isoformat()
         logger.info(f"Starting pipeline: destination={self.destination}, years={self.start_year}-{self.end_year}, all_types={self.include_all_types}")
-        
+
         try:
             # Step 1: Extract
             extracted_data = self._extract()
@@ -93,15 +91,15 @@ class PipelineRunner:
             self.metrics["records_extracted"] = len(extracted_data.get("footprint_data", []))
             self.metrics["record_types"] = list(set(r["record_type"] for r in extracted_data.get("footprint_data", [])))
             logger.info(f"Extracted {self.metrics['countries_extracted']} countries, {self.metrics['records_extracted']} records")
-            
+
             if not extracted_data.get("footprint_data"):
                 logger.warning("No data extracted, skipping transform and load")
                 return self._finalize_metrics("no_data")
-            
+
             # Step 2: Store raw data (S3 or local)
             raw_path = self._store_raw(extracted_data)
             logger.info(f"Stored raw data: {raw_path}")
-            
+
             # Step 3: Transform
             transformed_data = self._transform(extracted_data)
             self.metrics["records_transformed"] = (
@@ -109,66 +107,66 @@ class PipelineRunner:
                 len(transformed_data.get("footprint_data", []))
             )
             logger.info(f"Transformed {self.metrics['records_transformed']} total records")
-            
+
             # Step 4: Store processed data
             processed_path = self._store_processed(transformed_data)
             logger.info(f"Stored processed data: {processed_path}")
-            
+
             # Step 5: Load to destination(s)
             load_results = self._load(transformed_data)
             self.metrics["records_loaded"] = load_results.get("total_loaded", 0)
             logger.info(f"Loaded {self.metrics['records_loaded']} records to {self.destination}")
-            
+
             return self._finalize_metrics("success")
-            
+
         except Exception as e:
             logger.exception(f"Pipeline failed: {e}")
             self.metrics["errors"].append(str(e))
             return self._finalize_metrics("failed")
-    
+
     def _extract(self) -> dict[str, list[dict]]:
         """Extract data from GFN API."""
         from gfn_pipeline.pipeline_async import ExtractionConfig, extract_all_data, ALL_RECORD_TYPES
-        
+
         api_key = os.getenv("GFN_API_KEY")
         if not api_key:
             raise ValueError("GFN_API_KEY environment variable required")
-        
+
         config = ExtractionConfig(api_key=api_key)
-        
+
         # Determine record types to extract
         if self.include_all_types:
             record_types = list(ALL_RECORD_TYPES.keys())
         else:
             record_types = ["EFCtot"]
-        
+
         return asyncio.run(extract_all_data(config, self.start_year, self.end_year, record_types))
-    
+
     def _store_raw(self, data: dict[str, list[dict]]) -> str:
         """Store raw data to S3 or local filesystem."""
         timestamp = datetime.now(timezone.utc)
         filename = f"gfn_data_{timestamp.strftime('%Y%m%d_%H%M%S')}.json"
-        
+
         if self.use_localstack or os.getenv("AWS_ENDPOINT_URL"):
             # Store to S3 (LocalStack or real AWS)
             import boto3
             from botocore.config import Config
-            
+
             s3_config = {
                 "region_name": os.getenv("AWS_REGION", "us-east-1"),
                 "config": Config(signature_version="s3v4"),
             }
-            
+
             endpoint_url = os.getenv("AWS_ENDPOINT_URL")
             if endpoint_url:
                 s3_config["endpoint_url"] = endpoint_url
                 s3_config["aws_access_key_id"] = os.getenv("AWS_ACCESS_KEY_ID", "test")
                 s3_config["aws_secret_access_key"] = os.getenv("AWS_SECRET_ACCESS_KEY", "test")
-            
+
             s3 = boto3.client("s3", **s3_config)
             bucket = os.getenv("S3_BUCKET", "gfn-data-lake")
             key = f"raw/gfn/{timestamp.strftime('%Y/%m/%d')}/{filename}"
-            
+
             s3.put_object(
                 Bucket=bucket,
                 Key=key,
@@ -181,15 +179,15 @@ class PipelineRunner:
             data_dir = Path(os.getenv("DATA_DIR", "data")) / "raw"
             data_dir.mkdir(parents=True, exist_ok=True)
             filepath = data_dir / filename
-            
+
             with open(filepath, "w") as f:
                 json.dump(data, f)
             return str(filepath)
-    
+
     def _transform(self, data: dict[str, list[dict]]) -> dict[str, list[dict]]:
         """Transform and validate data."""
         transformed_at = datetime.now(timezone.utc).isoformat()
-        
+
         # Transform countries (minimal transformation)
         countries = []
         seen_countries = set()
@@ -203,7 +201,7 @@ class PipelineRunner:
                 **c,
                 "transformed_at": transformed_at,
             })
-        
+
         # Transform footprint data
         footprint_data = []
         seen_records = set()
@@ -211,47 +209,47 @@ class PipelineRunner:
             # Validate required fields
             if not r.get("country_code") or not r.get("year") or not r.get("record_type"):
                 continue
-            
+
             # Deduplicate
             key = (r["country_code"], r["year"], r["record_type"])
             if key in seen_records:
                 continue
             seen_records.add(key)
-            
+
             footprint_data.append({
                 **r,
                 "transformed_at": transformed_at,
             })
-        
+
         return {
             "countries": countries,
             "footprint_data": footprint_data,
         }
-    
+
     def _store_processed(self, data: dict[str, list[dict]]) -> str:
         """Store processed data."""
         timestamp = datetime.now(timezone.utc)
         filename = f"gfn_data_{timestamp.strftime('%Y%m%d_%H%M%S')}_processed.json"
-        
+
         if self.use_localstack or os.getenv("AWS_ENDPOINT_URL"):
             import boto3
             from botocore.config import Config
-            
+
             s3_config = {
                 "region_name": os.getenv("AWS_REGION", "us-east-1"),
                 "config": Config(signature_version="s3v4"),
             }
-            
+
             endpoint_url = os.getenv("AWS_ENDPOINT_URL")
             if endpoint_url:
                 s3_config["endpoint_url"] = endpoint_url
                 s3_config["aws_access_key_id"] = os.getenv("AWS_ACCESS_KEY_ID", "test")
                 s3_config["aws_secret_access_key"] = os.getenv("AWS_SECRET_ACCESS_KEY", "test")
-            
+
             s3 = boto3.client("s3", **s3_config)
             bucket = os.getenv("S3_BUCKET", "gfn-data-lake")
             key = f"processed/gfn/{timestamp.strftime('%Y/%m/%d')}/{filename}"
-            
+
             s3.put_object(
                 Bucket=bucket,
                 Key=key,
@@ -263,20 +261,20 @@ class PipelineRunner:
             data_dir = Path(os.getenv("DATA_DIR", "data")) / "processed"
             data_dir.mkdir(parents=True, exist_ok=True)
             filepath = data_dir / filename
-            
+
             with open(filepath, "w") as f:
                 json.dump(data, f)
             return str(filepath)
-    
+
     def _load(self, data: dict[str, list[dict]]) -> dict:
         """Load data to destination(s)."""
         results = {"destinations": {}, "total_loaded": 0}
-        
+
         destinations = (
             ["duckdb", "snowflake"] if self.destination == "both"
             else [self.destination]
         )
-        
+
         for dest in destinations:
             try:
                 if dest == "duckdb":
@@ -285,27 +283,27 @@ class PipelineRunner:
                     count = self._load_to_snowflake(data)
                 else:
                     raise ValueError(f"Unknown destination: {dest}")
-                
+
                 results["destinations"][dest] = {"status": "success", "count": count}
                 results["total_loaded"] += count
-                
+
             except Exception as e:
                 logger.error(f"Failed to load to {dest}: {e}")
                 results["destinations"][dest] = {"status": "failed", "error": str(e)}
                 self.metrics["errors"].append(f"{dest}: {e}")
-        
+
         return results
-    
+
     def _load_to_duckdb(self, data: dict[str, list[dict]]) -> int:
         """Load data to DuckDB."""
         import duckdb
-        
+
         db_path = os.getenv("DUCKDB_PATH", "gfn.duckdb")
         logger.info(f"Loading to DuckDB: {db_path}")
-        
+
         conn = duckdb.connect(db_path)
         total_loaded = 0
-        
+
         # Create and load countries table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS countries (
@@ -318,7 +316,7 @@ class PipelineRunner:
                 loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
         countries = data.get("countries", [])
         if countries:
             conn.execute("DELETE FROM countries")
@@ -331,7 +329,7 @@ class PipelineRunner:
                 for c in countries
             ])
             total_loaded += len(countries)
-        
+
         # Create and load footprint_data table
         conn.execute("""
             CREATE TABLE IF NOT EXISTS footprint_data (
@@ -350,7 +348,7 @@ class PipelineRunner:
                 PRIMARY KEY (country_code, year, record_type)
             )
         """)
-        
+
         footprint_data = data.get("footprint_data", [])
         if footprint_data:
             # Use INSERT OR REPLACE for upsert
@@ -365,45 +363,45 @@ class PipelineRunner:
                 for r in footprint_data
             ])
             total_loaded += len(footprint_data)
-        
+
         # Create useful views
         conn.execute("""
             CREATE OR REPLACE VIEW ecological_footprint AS
             SELECT * FROM footprint_data
             WHERE record_type LIKE 'EFC%' AND record_type NOT LIKE '%PerCap'
         """)
-        
+
         conn.execute("""
             CREATE OR REPLACE VIEW biocapacity AS
             SELECT * FROM footprint_data
             WHERE record_type LIKE 'BioCap%' AND record_type NOT LIKE '%PerCap'
         """)
-        
+
         conn.execute("""
             CREATE OR REPLACE VIEW per_capita_metrics AS
             SELECT * FROM footprint_data
             WHERE record_type LIKE '%PerCap'
         """)
-        
+
         conn.execute("""
             CREATE OR REPLACE VIEW ecological_deficit AS
             SELECT * FROM footprint_data
             WHERE record_type LIKE 'EFCdef%'
         """)
-        
+
         conn.close()
         return total_loaded
-    
+
     def _load_to_snowflake(self, data: dict[str, list[dict]]) -> int:
         """Load data to Snowflake."""
         import snowflake.connector
-        
+
         account = os.getenv("SNOWFLAKE_ACCOUNT")
         if not account:
             raise ValueError("SNOWFLAKE_ACCOUNT environment variable required")
-        
+
         logger.info(f"Loading to Snowflake: {account}")
-        
+
         conn = snowflake.connector.connect(
             account=account,
             user=os.getenv("SNOWFLAKE_USER"),
@@ -412,10 +410,10 @@ class PipelineRunner:
             database=os.getenv("SNOWFLAKE_DATABASE", "GFN"),
             schema=os.getenv("SNOWFLAKE_SCHEMA", "RAW"),
         )
-        
+
         cursor = conn.cursor()
         total_loaded = 0
-        
+
         # Create and load countries table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS COUNTRIES (
@@ -428,7 +426,7 @@ class PipelineRunner:
                 loaded_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()
             )
         """)
-        
+
         countries = data.get("countries", [])
         if countries:
             cursor.execute("DELETE FROM COUNTRIES")
@@ -439,7 +437,7 @@ class PipelineRunner:
                 """, (c["country_code"], c["country_name"], c.get("iso_alpha2"), c.get("version"),
                       c.get("extracted_at"), c.get("transformed_at")))
             total_loaded += len(countries)
-        
+
         # Create and load footprint_data table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS FOOTPRINT_DATA (
@@ -458,7 +456,7 @@ class PipelineRunner:
                 PRIMARY KEY (country_code, year, record_type)
             )
         """)
-        
+
         footprint_data = data.get("footprint_data", [])
         for r in footprint_data:
             cursor.execute("""
@@ -489,13 +487,13 @@ class PipelineRunner:
                 r.get("carbon"), r.get("score"), r.get("extracted_at"), r.get("transformed_at"),
             ))
             total_loaded += 1
-        
+
         conn.commit()
         cursor.close()
         conn.close()
-        
+
         return total_loaded
-    
+
     def _finalize_metrics(self, status: str) -> dict:
         """Finalize and return metrics."""
         self.metrics["end_time"] = datetime.now(timezone.utc).isoformat()
@@ -504,7 +502,7 @@ class PipelineRunner:
             datetime.fromisoformat(self.metrics["end_time"].replace("Z", "+00:00")) -
             datetime.fromisoformat(self.metrics["start_time"].replace("Z", "+00:00"))
         ).total_seconds()
-        
+
         logger.info(f"Pipeline completed: status={status}, duration={self.metrics['duration_seconds']:.1f}s")
         return self.metrics
 
@@ -558,11 +556,11 @@ Examples:
         help="Only extract EFCtot (legacy mode)",
     )
     args = parser.parse_args()
-    
+
     # Create logs directory if needed
     log_dir = Path(os.getenv("LOG_DIR", "logs"))
     log_dir.mkdir(parents=True, exist_ok=True)
-    
+
     runner = PipelineRunner(
         destination=args.destination,
         start_year=args.start_year,
@@ -570,15 +568,15 @@ Examples:
         use_localstack=not args.no_localstack,
         include_all_types=not args.legacy,
     )
-    
+
     result = runner.run()
-    
+
     # Print summary
     print("\n" + "=" * 70)
     print("PIPELINE SUMMARY")
     print("=" * 70)
     print(json.dumps(result, indent=2))
-    
+
     # Exit with appropriate code
     sys.exit(0 if result["status"] == "success" else 1)
 

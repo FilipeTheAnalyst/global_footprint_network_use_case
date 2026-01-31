@@ -13,7 +13,6 @@ Usage:
     uv run python -m infrastructure.load_to_snowflake --file processed/carbon_footprint/2026/01/31/data_015435_processed.json
 """
 import argparse
-import json
 import os
 import tempfile
 from pathlib import Path
@@ -62,7 +61,7 @@ def get_snowflake_connection():
     """Get Snowflake connection."""
     if not HAS_SNOWFLAKE:
         raise ImportError("snowflake-connector-python not installed")
-    
+
     return snowflake.connector.connect(
         account=SNOWFLAKE_ACCOUNT,
         user=SNOWFLAKE_USER,
@@ -75,17 +74,17 @@ def get_snowflake_connection():
 def list_processed_files():
     """List all processed JSON files in LocalStack S3."""
     s3 = get_s3_client()
-    
+
     response = s3.list_objects_v2(
         Bucket=S3_BUCKET,
         Prefix="processed/carbon_footprint/"
     )
-    
+
     files = []
     for obj in response.get("Contents", []):
         if obj["Key"].endswith(".json") and not obj["Key"].endswith(".keep"):
             files.append(obj["Key"])
-    
+
     return sorted(files)
 
 
@@ -100,19 +99,19 @@ def load_to_snowflake(local_path: str, source_file: str):
     """Upload file to Snowflake stage and load into table."""
     conn = get_snowflake_connection()
     cursor = conn.cursor()
-    
+
     try:
         # Use the RAW schema
         cursor.execute("USE SCHEMA GFN.RAW")
-        
+
         # Upload to internal stage using PUT
         put_sql = f"PUT file://{local_path} @gfn_data_stage AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
         cursor.execute(put_sql)
-        print(f"  Uploaded to stage: @gfn_data_stage")
-        
+        print("  Uploaded to stage: @gfn_data_stage")
+
         # Get the filename
         filename = Path(local_path).name
-        
+
         # Load data using COPY INTO with MATCH_BY_COLUMN_NAME
         copy_sql = f"""
         COPY INTO CARBON_FOOTPRINT_RAW (
@@ -137,17 +136,17 @@ def load_to_snowflake(local_path: str, source_file: str):
         ON_ERROR = CONTINUE
         """
         cursor.execute(copy_sql)
-        
+
         # Get load results
         result = cursor.fetchone()
         if result:
             print(f"  Loaded: {result}")
-        
+
         # Clean up stage
         cursor.execute(f"REMOVE @gfn_data_stage/{filename}")
-        
+
         return True
-        
+
     except Exception as e:
         print(f"  Error: {e}")
         return False
@@ -161,21 +160,21 @@ def main():
     parser.add_argument("--file", help="Specific S3 key to load (default: latest)")
     parser.add_argument("--all", action="store_true", help="Load all processed files")
     args = parser.parse_args()
-    
+
     print("=" * 60)
     print("  LocalStack → Snowflake Data Loader")
     print("=" * 60)
-    
+
     # Check prerequisites
     if not HAS_SNOWFLAKE:
         print("Error: snowflake-connector-python not installed")
         print("  Run: uv add snowflake-connector-python")
         return
-    
+
     if not SNOWFLAKE_ACCOUNT:
         print("Error: SNOWFLAKE_ACCOUNT not set in environment")
         return
-    
+
     # Get files to load
     if args.file:
         files = [args.file]
@@ -186,19 +185,19 @@ def main():
         files = list_processed_files()
         if files:
             files = [files[-1]]  # Latest file only
-            print(f"\nLoading latest file (use --all for all files)")
+            print("\nLoading latest file (use --all for all files)")
         else:
             print("No processed files found in LocalStack S3")
             return
-    
+
     # Load each file
     success_count = 0
     for s3_key in files:
         print(f"\n[{files.index(s3_key) + 1}/{len(files)}] {s3_key}")
-        
+
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
             tmp_path = tmp.name
-        
+
         try:
             download_from_localstack(s3_key, tmp_path)
             if load_to_snowflake(tmp_path, s3_key):
@@ -206,11 +205,11 @@ def main():
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
-    
+
     print(f"\n{'=' * 60}")
     print(f"  Loaded {success_count}/{len(files)} files successfully")
     print("=" * 60)
-    
+
     # Show sample data
     if success_count > 0:
         print("\nVerifying data in Snowflake...")

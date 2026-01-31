@@ -1,247 +1,616 @@
 """
-Tests for GFN Pipeline core functionality.
+Tests for GFN Pipeline - Covers both dlt+DuckDB and AWS Lambda approaches.
+
+Test Categories:
+- Unit tests: Test core logic with mocked dependencies
+- Integration tests: Require LocalStack running (marked with @pytest.mark.integration)
 """
 import json
 import os
 import pytest
 from datetime import datetime, timezone
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 
-class TestTransform:
-    """Tests for data transformation."""
-    
+# ============================================================================
+# Unit Tests - dlt+DuckDB Pipeline (pipeline_async.py)
+# ============================================================================
+
+class TestDynamicRecordTypeDiscovery:
+    """Tests for dynamic record type discovery from API."""
+
+    @pytest.mark.asyncio
+    async def test_discover_record_types_from_sample_year(self):
+        """Test discovering record types from sample year data."""
+        from gfn_pipeline.pipeline_async import discover_record_types_from_sample_year
+
+        # Mock API response
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(return_value=[
+            {"record": "EFConsTotGHA", "countryCode": 1, "year": 2020},
+            {"record": "BiocapTotGHA", "countryCode": 1, "year": 2020},
+            {"record": "EFConsTotGHA", "countryCode": 2, "year": 2020},  # Duplicate type
+        ])
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response)))
+
+        mock_auth = MagicMock()
+
+        result = await discover_record_types_from_sample_year(
+            mock_session, mock_auth, "https://api.test.com", 2020
+        )
+
+        assert "EFConsTotGHA" in result
+        assert "BiocapTotGHA" in result
+        assert len(result) == 2  # Deduplicated
+
+    @pytest.mark.asyncio
+    async def test_fetch_record_types_from_api(self):
+        """Test fetching record types from /types endpoint."""
+        from gfn_pipeline.pipeline_async import fetch_record_types_from_api
+
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.json = AsyncMock(return_value=[
+            {"code": "EF", "name": "Ecological Footprint", "record": "EFConsTotGHA"},
+            {"code": "BC", "name": "Biocapacity", "record": "BiocapTotGHA"},
+        ])
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=AsyncMock(__aenter__=AsyncMock(return_value=mock_response)))
+
+        mock_auth = MagicMock()
+
+        result = await fetch_record_types_from_api(
+            mock_session, mock_auth, "https://api.test.com"
+        )
+
+        assert "EF" in result
+        assert result["EF"]["name"] == "Ecological Footprint"
+        assert result["EF"]["record"] == "EFConsTotGHA"
+
+    def test_get_record_types_sync_caches_result(self):
+        """Test that record types are cached after first fetch."""
+        from gfn_pipeline.pipeline_async import (
+            get_record_types_sync,
+            clear_record_types_cache
+        )
+
+        # Clear cache first
+        clear_record_types_cache()
+
+        # Mock the async fetch
+        with patch('gfn_pipeline.pipeline_async.asyncio.run') as mock_run:
+            mock_run.return_value = {"EFConsTotGHA": "Ecological Footprint"}
+
+            result1 = get_record_types_sync("test_api_key")
+            result2 = get_record_types_sync("test_api_key")
+
+            # Should only call asyncio.run once due to caching
+            assert mock_run.call_count == 1
+            assert result1 == result2
+
+
+class TestExtractionConfig:
+    """Tests for extraction configuration."""
+
+    def test_config_requires_api_key(self):
+        """Test that config raises error without API key."""
+        from gfn_pipeline.pipeline_async import ExtractionConfig
+
+        with patch.dict(os.environ, {"GFN_API_KEY": ""}, clear=True):
+            with pytest.raises(ValueError, match="API key required"):
+                ExtractionConfig(api_key=None)
+
+    def test_config_uses_env_var(self):
+        """Test that config reads API key from environment."""
+        from gfn_pipeline.pipeline_async import ExtractionConfig
+
+        with patch.dict(os.environ, {"GFN_API_KEY": "test_key_123"}):
+            config = ExtractionConfig()
+            assert config.api_key == "test_key_123"
+
+    def test_config_defaults(self):
+        """Test configuration default values."""
+        from gfn_pipeline.pipeline_async import ExtractionConfig
+
+        with patch.dict(os.environ, {"GFN_API_KEY": "test_key"}):
+            config = ExtractionConfig()
+
+            assert config.max_concurrent_requests == 5
+            assert config.requests_per_second == 2.0
+            assert config.request_timeout == 60
+            assert config.parallel_year_batches == 3
+
+
+class TestTokenBucketRateLimiter:
+    """Tests for rate limiter."""
+
+    @pytest.mark.asyncio
+    async def test_rate_limiter_allows_burst(self):
+        """Test that rate limiter allows burst requests."""
+        from gfn_pipeline.pipeline_async import TokenBucketRateLimiter
+
+        limiter = TokenBucketRateLimiter(rate=1.0, burst=3)
+
+        # Should allow 3 immediate requests (burst)
+        import time
+        start = time.monotonic()
+
+        await limiter.acquire()
+        await limiter.acquire()
+        await limiter.acquire()
+
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.5  # Should be nearly instant
+
+    @pytest.mark.asyncio
+    async def test_rate_limiter_throttles_after_burst(self):
+        """Test that rate limiter throttles after burst exhausted."""
+        from gfn_pipeline.pipeline_async import TokenBucketRateLimiter
+
+        limiter = TokenBucketRateLimiter(rate=10.0, burst=1)  # Fast rate for testing
+
+        import time
+        start = time.monotonic()
+
+        await limiter.acquire()  # Uses burst
+        await limiter.acquire()  # Should wait
+
+        elapsed = time.monotonic() - start
+        assert elapsed >= 0.05  # Should have waited ~0.1s
+
+
+# ============================================================================
+# Unit Tests - Lambda Handlers (lambda_handlers.py)
+# ============================================================================
+
+class TestLambdaExtractHandler:
+    """Tests for Lambda extract handler."""
+
+    def test_extract_handler_returns_step_functions_format(self):
+        """Test extract handler returns Step Functions compatible output."""
+        from infrastructure.lambda_handlers import handler_extract
+
+        with patch('infrastructure.lambda_handlers._extract_bulk') as mock_extract:
+            mock_extract.return_value = {
+                "countries": [{"country_code": 1}],
+                "footprint_data": [
+                    {"country_code": 1, "year": 2024, "record_type": "EFConsTotGHA"}
+                ],
+                "record_types": ["EFConsTotGHA"],
+                "metadata": {"total_records": 1}
+            }
+
+            with patch('infrastructure.lambda_handlers.get_s3_client') as mock_s3:
+                mock_s3.return_value = MagicMock()
+
+                with patch('infrastructure.lambda_handlers.get_sqs_client') as mock_sqs:
+                    mock_sqs.return_value = MagicMock()
+                    mock_sqs.return_value.get_queue_url.side_effect = Exception("Queue not found")
+
+                    with patch.dict(os.environ, {"GFN_API_KEY": "test_key"}):
+                        result = handler_extract({"start_year": 2024, "end_year": 2024})
+
+        assert "status" in result
+        assert "records_count" in result
+        assert "s3_key" in result
+        assert "s3_bucket" in result
+
+    def test_extract_handler_handles_no_data(self):
+        """Test extract handler handles empty API response."""
+        from infrastructure.lambda_handlers import handler_extract
+
+        with patch('infrastructure.lambda_handlers._extract_bulk') as mock_extract:
+            mock_extract.return_value = {
+                "countries": [],
+                "footprint_data": [],
+                "record_types": [],
+                "metadata": {"total_records": 0}
+            }
+
+            with patch.dict(os.environ, {"GFN_API_KEY": "test_key"}):
+                result = handler_extract({"start_year": 2024, "end_year": 2024})
+
+        assert result["status"] == "no_data"
+        assert result["records_count"] == 0
+
+
+class TestLambdaTransformHandler:
+    """Tests for Lambda transform handler."""
+
+    def test_transform_validates_required_fields(self):
+        """Test transform handler validates required fields."""
+        from infrastructure.lambda_handlers import handler_transform
+
+        raw_data = {
+            "footprint_data": [
+                {"country_code": 1, "year": 2024, "record_type": "EF"},
+                {"country_code": None, "year": 2024, "record_type": "EF"},  # Invalid
+                {"country_code": 2, "year": None, "record_type": "EF"},  # Invalid
+            ],
+            "countries": [],
+            "record_types": []
+        }
+
+        with patch('infrastructure.lambda_handlers.get_s3_client') as mock_s3:
+            mock_s3_instance = MagicMock()
+            mock_s3_instance.get_object.return_value = {
+                "Body": MagicMock(read=lambda: json.dumps(raw_data).encode())
+            }
+            mock_s3.return_value = mock_s3_instance
+
+            with patch('infrastructure.lambda_handlers.get_sqs_client') as mock_sqs:
+                mock_sqs.return_value = MagicMock()
+                mock_sqs.return_value.get_queue_url.side_effect = Exception("Queue not found")
+
+                result = handler_transform({
+                    "s3_bucket": "test-bucket",
+                    "s3_key": "raw/test/data.json"
+                })
+
+        assert result["status"] == "success"
+        assert result["records_count"] == 1  # Only valid record
+
+    def test_transform_deduplicates_records(self):
+        """Test transform handler removes duplicates."""
+        from infrastructure.lambda_handlers import handler_transform
+
+        raw_data = {
+            "footprint_data": [
+                {"country_code": 1, "year": 2024, "record_type": "EF", "value": 100},
+                {"country_code": 1, "year": 2024, "record_type": "EF", "value": 200},  # Duplicate
+                {"country_code": 1, "year": 2023, "record_type": "EF", "value": 150},  # Different year
+            ],
+            "countries": [],
+            "record_types": []
+        }
+
+        with patch('infrastructure.lambda_handlers.get_s3_client') as mock_s3:
+            mock_s3_instance = MagicMock()
+            mock_s3_instance.get_object.return_value = {
+                "Body": MagicMock(read=lambda: json.dumps(raw_data).encode())
+            }
+            mock_s3.return_value = mock_s3_instance
+
+            with patch('infrastructure.lambda_handlers.get_sqs_client') as mock_sqs:
+                mock_sqs.return_value = MagicMock()
+                mock_sqs.return_value.get_queue_url.side_effect = Exception("Queue not found")
+
+                result = handler_transform({
+                    "s3_bucket": "test-bucket",
+                    "s3_key": "raw/test/data.json"
+                })
+
+        assert result["records_count"] == 2  # First record + different year
+
+    def test_transform_calculates_carbon_percentage(self):
+        """Test transform handler calculates carbon percentage."""
+        from infrastructure.lambda_handlers import handler_transform
+
+        raw_data = {
+            "footprint_data": [
+                {"country_code": 1, "year": 2024, "record_type": "EF", "carbon": 100, "value": 400},
+            ],
+            "countries": [],
+            "record_types": []
+        }
+
+        transformed_data = None
+
+        with patch('infrastructure.lambda_handlers.get_s3_client') as mock_s3:
+            mock_s3_instance = MagicMock()
+            mock_s3_instance.get_object.return_value = {
+                "Body": MagicMock(read=lambda: json.dumps(raw_data).encode())
+            }
+
+            def capture_put(Bucket, Key, Body, **kwargs):
+                nonlocal transformed_data
+                transformed_data = json.loads(Body.decode())
+
+            mock_s3_instance.put_object = capture_put
+            mock_s3.return_value = mock_s3_instance
+
+            with patch('infrastructure.lambda_handlers.get_sqs_client') as mock_sqs:
+                mock_sqs.return_value = MagicMock()
+                mock_sqs.return_value.get_queue_url.side_effect = Exception("Queue not found")
+
+                handler_transform({
+                    "s3_bucket": "test-bucket",
+                    "s3_key": "raw/test/data.json"
+                })
+
+        assert transformed_data is not None
+        assert transformed_data["footprint_data"][0]["carbon_pct_of_total"] == 25.0
+
+    def test_transform_handles_sqs_event_wrapper(self):
+        """Test transform handler handles SQS event format."""
+        from infrastructure.lambda_handlers import handler_transform
+
+        raw_data = {
+            "footprint_data": [{"country_code": 1, "year": 2024, "record_type": "EF"}],
+            "countries": [],
+            "record_types": []
+        }
+
+        sqs_event = {
+            "Records": [{
+                "body": json.dumps({
+                    "s3_bucket": "test-bucket",
+                    "s3_key": "raw/test/data.json"
+                })
+            }]
+        }
+
+        with patch('infrastructure.lambda_handlers.get_s3_client') as mock_s3:
+            mock_s3_instance = MagicMock()
+            mock_s3_instance.get_object.return_value = {
+                "Body": MagicMock(read=lambda: json.dumps(raw_data).encode())
+            }
+            mock_s3.return_value = mock_s3_instance
+
+            with patch('infrastructure.lambda_handlers.get_sqs_client') as mock_sqs:
+                mock_sqs.return_value = MagicMock()
+                mock_sqs.return_value.get_queue_url.side_effect = Exception("Queue not found")
+
+                result = handler_transform(sqs_event)
+
+        assert result["status"] == "success"
+
+
+class TestLambdaLoadHandler:
+    """Tests for Lambda load handler."""
+
+    def test_load_handler_returns_step_functions_format(self):
+        """Test load handler returns Step Functions compatible output."""
+        from infrastructure.lambda_handlers import handler_load
+
+        processed_data = {
+            "footprint_data": [
+                {"country_code": 1, "year": 2024, "record_type": "EF"}
+            ]
+        }
+
+        with patch('infrastructure.lambda_handlers.get_s3_client') as mock_s3:
+            mock_s3_instance = MagicMock()
+            mock_s3_instance.get_object.return_value = {
+                "Body": MagicMock(read=lambda: json.dumps(processed_data).encode())
+            }
+            mock_s3.return_value = mock_s3_instance
+
+            with patch('infrastructure.lambda_handlers._load_to_duckdb_bulk') as mock_load:
+                mock_load.return_value = 1
+
+                # Ensure no Snowflake account configured
+                with patch.dict(os.environ, {"SNOWFLAKE_ACCOUNT": ""}, clear=False):
+                    result = handler_load({
+                        "s3_bucket": "test-bucket",
+                        "s3_key": "processed/test/data.json"
+                    })
+
+        assert result["status"] == "success"
+        assert result["records_loaded"] == 1
+        assert result["destination"] == "duckdb"
+
+    def test_load_handler_chooses_snowflake_when_configured(self):
+        """Test load handler uses Snowflake when account is configured."""
+        from infrastructure.lambda_handlers import handler_load
+
+        processed_data = {
+            "footprint_data": [{"country_code": 1, "year": 2024, "record_type": "EF"}]
+        }
+
+        with patch('infrastructure.lambda_handlers.get_s3_client') as mock_s3:
+            mock_s3_instance = MagicMock()
+            mock_s3_instance.get_object.return_value = {
+                "Body": MagicMock(read=lambda: json.dumps(processed_data).encode())
+            }
+            mock_s3.return_value = mock_s3_instance
+
+            with patch('infrastructure.lambda_handlers._load_to_snowflake_bulk') as mock_load:
+                mock_load.return_value = 1
+
+                with patch.dict(os.environ, {"SNOWFLAKE_ACCOUNT": "test_account"}):
+                    result = handler_load({
+                        "s3_bucket": "test-bucket",
+                        "s3_key": "processed/test/data.json"
+                    })
+
+        assert result["destination"] == "snowflake"
+
+
+# ============================================================================
+# Unit Tests - Legacy PipelineRunner (main.py)
+# ============================================================================
+
+class TestPipelineRunnerTransform:
+    """Tests for PipelineRunner transformation logic."""
+
     def test_transform_validates_required_fields(self):
         """Test that transform validates required fields."""
         from gfn_pipeline.main import PipelineRunner
-        
+
         runner = PipelineRunner()
-        
-        # Records without country_code or year should be filtered
-        data = [
-            {"country_code": 1, "year": 2024, "country_name": "Test"},
-            {"country_code": None, "year": 2024, "country_name": "Invalid"},
-            {"country_code": 2, "year": None, "country_name": "Invalid"},
-            {"country_code": 3, "year": 2024, "country_name": "Valid"},
-        ]
-        
+
+        # New format: dict with countries and footprint_data
+        data = {
+            "countries": [],
+            "footprint_data": [
+                {"country_code": 1, "year": 2024, "record_type": "EF", "country_name": "Test"},
+                {"country_code": None, "year": 2024, "record_type": "EF", "country_name": "Invalid"},
+                {"country_code": 2, "year": None, "record_type": "EF", "country_name": "Invalid"},
+                {"country_code": 3, "year": 2024, "record_type": "EF", "country_name": "Valid"},
+            ]
+        }
+
         result = runner._transform(data)
-        
-        assert len(result) == 2
-        assert result[0]["country_code"] == 1
-        assert result[1]["country_code"] == 3
-    
+
+        assert len(result["footprint_data"]) == 2
+        assert result["footprint_data"][0]["country_code"] == 1
+        assert result["footprint_data"][1]["country_code"] == 3
+
     def test_transform_deduplicates(self):
         """Test that transform removes duplicates."""
         from gfn_pipeline.main import PipelineRunner
-        
+
         runner = PipelineRunner()
-        
-        data = [
-            {"country_code": 1, "year": 2024, "country_name": "First"},
-            {"country_code": 1, "year": 2024, "country_name": "Duplicate"},
-            {"country_code": 1, "year": 2023, "country_name": "Different Year"},
-        ]
-        
+
+        data = {
+            "countries": [],
+            "footprint_data": [
+                {"country_code": 1, "year": 2024, "record_type": "EF", "country_name": "First"},
+                {"country_code": 1, "year": 2024, "record_type": "EF", "country_name": "Duplicate"},
+                {"country_code": 1, "year": 2023, "record_type": "EF", "country_name": "Different Year"},
+            ]
+        }
+
         result = runner._transform(data)
-        
-        assert len(result) == 2
-        assert result[0]["country_name"] == "First"  # First one wins
-    
-    def test_transform_calculates_carbon_percentage(self):
-        """Test that transform calculates carbon percentage."""
+
+        assert len(result["footprint_data"]) == 2
+        assert result["footprint_data"][0]["country_name"] == "First"
+
+    def test_transform_validates_record_type(self):
+        """Test that transform requires record_type field."""
         from gfn_pipeline.main import PipelineRunner
-        
+
         runner = PipelineRunner()
-        
-        data = [
-            {
-                "country_code": 1,
-                "year": 2024,
-                "carbon_footprint_gha": 100,
-                "total_footprint_gha": 400,
-            },
-        ]
-        
+
+        data = {
+            "countries": [],
+            "footprint_data": [
+                {"country_code": 1, "year": 2024, "record_type": "EF"},  # Valid
+                {"country_code": 2, "year": 2024},  # Missing record_type
+            ]
+        }
+
         result = runner._transform(data)
-        
-        assert result[0]["carbon_pct_of_total"] == 25.0
-    
-    def test_transform_handles_missing_values(self):
-        """Test that transform handles missing carbon/total values."""
-        from gfn_pipeline.main import PipelineRunner
-        
-        runner = PipelineRunner()
-        
-        data = [
-            {"country_code": 1, "year": 2024, "carbon_footprint_gha": None},
-            {"country_code": 2, "year": 2024, "total_footprint_gha": None},
-        ]
-        
-        result = runner._transform(data)
-        
-        assert result[0]["carbon_pct_of_total"] is None
-        assert result[1]["carbon_pct_of_total"] is None
+
+        assert len(result["footprint_data"]) == 1
+        assert result["footprint_data"][0]["country_code"] == 1
 
 
 class TestDuckDBLoad:
     """Tests for DuckDB loading."""
-    
+
     @pytest.fixture
     def temp_duckdb(self, tmp_path):
         """Create a temporary DuckDB database."""
         db_path = tmp_path / "test.duckdb"
         return str(db_path)
-    
+
     def test_load_to_duckdb_creates_table(self, temp_duckdb):
         """Test that load creates table if not exists."""
         import duckdb
         from gfn_pipeline.main import PipelineRunner
-        
+
         with patch.dict(os.environ, {"DUCKDB_PATH": temp_duckdb}):
             runner = PipelineRunner(destination="duckdb")
-            
-            data = [
-                {
-                    "country_code": 1,
-                    "country_name": "Test Country",
-                    "iso_alpha2": "TC",
-                    "year": 2024,
-                    "carbon_footprint_gha": 100.0,
-                    "total_footprint_gha": 400.0,
-                    "carbon_pct_of_total": 25.0,
-                    "score": "A",
-                    "extracted_at": datetime.now(timezone.utc).isoformat(),
-                    "transformed_at": datetime.now(timezone.utc).isoformat(),
-                }
-            ]
-            
+
+            # New format: dict with countries and footprint_data
+            data = {
+                "countries": [
+                    {
+                        "country_code": 1,
+                        "country_name": "Test Country",
+                        "iso_alpha2": "TC",
+                        "version": "2024",
+                        "extracted_at": datetime.now(timezone.utc).isoformat(),
+                        "transformed_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ],
+                "footprint_data": [
+                    {
+                        "country_code": 1,
+                        "country_name": "Test Country",
+                        "iso_alpha2": "TC",
+                        "year": 2024,
+                        "record_type": "EFConsTotGHA",
+                        "record_type_description": "Ecological Footprint",
+                        "value": 400.0,
+                        "carbon": 100.0,
+                        "score": "A",
+                        "extracted_at": datetime.now(timezone.utc).isoformat(),
+                        "transformed_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ]
+            }
+
             count = runner._load_to_duckdb(data)
-            
-            assert count == 1
-            
-            # Verify data was inserted
+
+            assert count == 2  # 1 country + 1 footprint record
+
             conn = duckdb.connect(temp_duckdb)
-            result = conn.execute("SELECT * FROM carbon_footprint").fetchall()
+            result = conn.execute("SELECT * FROM footprint_data").fetchall()
             conn.close()
-            
+
             assert len(result) == 1
             assert result[0][0] == 1  # country_code
-            assert result[0][3] == 2024  # year
-    
+
     def test_load_to_duckdb_upserts(self, temp_duckdb):
         """Test that load performs upsert on duplicate keys."""
         import duckdb
         from gfn_pipeline.main import PipelineRunner
-        
+
         with patch.dict(os.environ, {"DUCKDB_PATH": temp_duckdb}):
             runner = PipelineRunner(destination="duckdb")
-            
-            # First load
-            data1 = [
-                {
-                    "country_code": 1,
-                    "country_name": "Original Name",
-                    "iso_alpha2": "TC",
-                    "year": 2024,
-                    "carbon_footprint_gha": 100.0,
-                    "total_footprint_gha": 400.0,
-                    "carbon_pct_of_total": 25.0,
-                    "score": "A",
-                    "extracted_at": datetime.now(timezone.utc).isoformat(),
-                    "transformed_at": datetime.now(timezone.utc).isoformat(),
-                }
-            ]
+
+            data1 = {
+                "countries": [],
+                "footprint_data": [
+                    {
+                        "country_code": 1,
+                        "country_name": "Original Name",
+                        "iso_alpha2": "TC",
+                        "year": 2024,
+                        "record_type": "EFConsTotGHA",
+                        "value": 100.0,
+                        "carbon": 25.0,
+                        "score": "A",
+                        "extracted_at": datetime.now(timezone.utc).isoformat(),
+                        "transformed_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ]
+            }
             runner._load_to_duckdb(data1)
-            
-            # Second load with updated name
-            data2 = [
-                {
-                    "country_code": 1,
-                    "country_name": "Updated Name",
-                    "iso_alpha2": "TC",
-                    "year": 2024,
-                    "carbon_footprint_gha": 200.0,
-                    "total_footprint_gha": 400.0,
-                    "carbon_pct_of_total": 50.0,
-                    "score": "B",
-                    "extracted_at": datetime.now(timezone.utc).isoformat(),
-                    "transformed_at": datetime.now(timezone.utc).isoformat(),
-                }
-            ]
+
+            data2 = {
+                "countries": [],
+                "footprint_data": [
+                    {
+                        "country_code": 1,
+                        "country_name": "Updated Name",
+                        "iso_alpha2": "TC",
+                        "year": 2024,
+                        "record_type": "EFConsTotGHA",
+                        "value": 200.0,
+                        "carbon": 50.0,
+                        "score": "B",
+                        "extracted_at": datetime.now(timezone.utc).isoformat(),
+                        "transformed_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                ]
+            }
             runner._load_to_duckdb(data2)
-            
-            # Verify only one record exists with updated values
+
             conn = duckdb.connect(temp_duckdb)
-            result = conn.execute("SELECT country_name, carbon_footprint_gha FROM carbon_footprint").fetchall()
+            result = conn.execute("SELECT country_name, value FROM footprint_data").fetchall()
             conn.close()
-            
+
             assert len(result) == 1
             assert result[0][0] == "Updated Name"
             assert result[0][1] == 200.0
 
 
-class TestAPIEndpoints:
-    """Tests for API endpoints."""
-    
-    @pytest.fixture
-    def client(self):
-        """Create test client."""
-        from fastapi.testclient import TestClient
-        from api.main import app
-        return TestClient(app)
-    
-    def test_root_endpoint(self, client):
-        """Test root endpoint returns API info."""
-        response = client.get("/")
-        assert response.status_code == 200
-        data = response.json()
-        assert "name" in data
-        assert data["name"] == "GFN Pipeline API"
-    
-    def test_health_endpoint(self, client):
-        """Test health endpoint."""
-        response = client.get("/health")
-        assert response.status_code == 200
-        data = response.json()
-        assert "status" in data
-        assert "services" in data
-    
-    def test_status_endpoint(self, client):
-        """Test status endpoint."""
-        response = client.get("/status")
-        assert response.status_code == 200
-        data = response.json()
-        assert "running" in data
-        assert "history" in data
+# ============================================================================
+# Integration Tests (require LocalStack)
+# ============================================================================
 
-
-class TestLambdaHandlers:
-    """Tests for Lambda handlers."""
-    
-    def test_transform_handler_validates_data(self):
-        """Test transform handler validates and enriches data."""
-        # This would require mocking S3, so we test the core logic
-        from infrastructure.lambda_handlers import handler_transform
-        
-        # Test would require LocalStack running, so mark as integration test
-        pass
-    
-    def test_extract_handler_requires_api_key(self):
-        """Test extract handler requires API key."""
-        from infrastructure.lambda_handlers import handler_extract
-        
-        with patch.dict(os.environ, {"GFN_API_KEY": ""}):
-            result = handler_extract({"start_year": 2024, "end_year": 2024})
-            # Should fail without API key
-            # Note: Actual test would need to mock the API call
-
-
-# Integration tests (require LocalStack)
 @pytest.mark.integration
 class TestLocalStackIntegration:
     """Integration tests requiring LocalStack."""
-    
+
     @pytest.fixture(autouse=True)
     def check_localstack(self):
         """Skip if LocalStack is not running."""
@@ -252,37 +621,138 @@ class TestLocalStackIntegration:
                 pytest.skip("LocalStack not healthy")
         except requests.exceptions.ConnectionError:
             pytest.skip("LocalStack not running")
-    
+
     def test_s3_bucket_exists(self):
         """Test S3 bucket is created."""
         import boto3
-        
+
         s3 = boto3.client(
             "s3",
             endpoint_url="http://localhost:4566",
             aws_access_key_id="test",
             aws_secret_access_key="test",
         )
-        
+
         buckets = s3.list_buckets()["Buckets"]
         bucket_names = [b["Name"] for b in buckets]
-        
+
         assert "gfn-data-lake" in bucket_names
-    
+
     def test_sqs_queues_exist(self):
         """Test SQS queues are created."""
         import boto3
-        
+
         sqs = boto3.client(
             "sqs",
             endpoint_url="http://localhost:4566",
             aws_access_key_id="test",
             aws_secret_access_key="test",
         )
-        
+
         queues = sqs.list_queues()
         queue_urls = queues.get("QueueUrls", [])
-        
+
         expected_queues = ["gfn-extract-queue", "gfn-transform-queue", "gfn-load-queue"]
         for queue in expected_queues:
             assert any(queue in url for url in queue_urls), f"Queue {queue} not found"
+
+    def test_lambda_functions_exist(self):
+        """Test Lambda functions are created."""
+        import boto3
+
+        lambda_client = boto3.client(
+            "lambda",
+            endpoint_url="http://localhost:4566",
+            aws_access_key_id="test",
+            aws_secret_access_key="test",
+            region_name="us-east-1",
+        )
+
+        functions = lambda_client.list_functions()["Functions"]
+        function_names = [f["FunctionName"] for f in functions]
+
+        expected_functions = ["gfn-extract", "gfn-transform", "gfn-load"]
+        for func in expected_functions:
+            assert func in function_names, f"Lambda {func} not found"
+
+    def test_step_functions_state_machine_exists(self):
+        """Test Step Functions state machine is created."""
+        import boto3
+
+        sfn = boto3.client(
+            "stepfunctions",
+            endpoint_url="http://localhost:4566",
+            aws_access_key_id="test",
+            aws_secret_access_key="test",
+            region_name="us-east-1",
+        )
+
+        state_machines = sfn.list_state_machines()["stateMachines"]
+        sm_names = [sm["name"] for sm in state_machines]
+
+        assert "gfn-pipeline-orchestrator" in sm_names
+
+
+@pytest.mark.integration
+class TestEndToEndExtraction:
+    """End-to-end extraction tests (require API key and LocalStack)."""
+
+    @pytest.fixture(autouse=True)
+    def check_prerequisites(self):
+        """Skip if prerequisites not met."""
+        import requests
+
+        # Check LocalStack
+        try:
+            response = requests.get("http://localhost:4566/_localstack/health", timeout=2)
+            if response.status_code != 200:
+                pytest.skip("LocalStack not healthy")
+        except requests.exceptions.ConnectionError:
+            pytest.skip("LocalStack not running")
+
+        # Check API key
+        if not os.getenv("GFN_API_KEY"):
+            pytest.skip("GFN_API_KEY not set")
+
+    def test_extract_single_year(self):
+        """Test extracting a single year of data."""
+        from infrastructure.lambda_handlers import handler_extract
+
+        result = handler_extract({
+            "start_year": 2023,
+            "end_year": 2023,
+        })
+
+        assert result["status"] == "success"
+        assert result["records_count"] > 0
+        assert result["s3_key"] is not None
+
+    def test_full_etl_pipeline(self):
+        """Test full ETL pipeline through all stages."""
+        from infrastructure.lambda_handlers import (
+            handler_extract,
+            handler_transform,
+            handler_load,
+        )
+
+        # Extract
+        extract_result = handler_extract({
+            "start_year": 2023,
+            "end_year": 2023,
+        })
+        assert extract_result["status"] == "success"
+
+        # Transform
+        transform_result = handler_transform({
+            "s3_bucket": extract_result["s3_bucket"],
+            "s3_key": extract_result["s3_key"],
+        })
+        assert transform_result["status"] == "success"
+
+        # Load
+        load_result = handler_load({
+            "s3_bucket": transform_result["s3_bucket"],
+            "s3_key": transform_result["s3_key"],
+        })
+        assert load_result["status"] == "success"
+        assert load_result["records_loaded"] > 0

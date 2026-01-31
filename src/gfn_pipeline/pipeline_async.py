@@ -14,12 +14,16 @@ API Endpoints Used:
 - GET /data/all/{year} - Get ALL data for ALL countries for a year (MOST EFFICIENT)
 
 Performance: Uses bulk endpoint for maximum efficiency (~1 API call per year).
+
+IMPORTANT: Record types are discovered dynamically from the API. The fallback
+dictionary is only used when API discovery fails completely.
 """
 from __future__ import annotations
 
 import asyncio
 import os
 import time
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterator
@@ -30,33 +34,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-
-# ============================================================================
-# Fallback Record Types (used if API discovery fails)
-# ============================================================================
-
-FALLBACK_RECORD_TYPES = {
-    # Core footprint/biocapacity types
-    "BiocapPerCap": "Biocapacity per person (gha)",
-    "BiocapTotGHA": "Total biocapacity (gha)",
-    "EFConsPerCap": "Ecological Footprint of consumption per capita (gha)",
-    "EFConsTotGHA": "Total Ecological Footprint of consumption (gha)",
-    "EFProdPerCap": "Ecological Footprint of production per capita (gha)",
-    "EFProdTotGHA": "Total Ecological Footprint of production (gha)",
-    "EFExportsPerCap": "Ecological Footprint of exports per capita (gha)",
-    "EFExportsTotGHA": "Total Ecological Footprint of exports (gha)",
-    "EFImportsPerCap": "Ecological Footprint of imports per capita (gha)",
-    "EFImportsTotGHA": "Total Ecological Footprint of imports (gha)",
-    # Area types
-    "AreaPerCap": "Area per capita (ha)",
-    "AreaTotHA": "Total area (hectares)",
-    # Supplementary indicators
-    "Earths": "Number of Earths required",
-    "Population": "Population",
-    "HDI": "Human Development Index",
-    "GDP-PPP": "GDP at Purchasing Power Parity",
-    "GDP-USD": "GDP in USD",
-}
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -72,7 +50,9 @@ class ExtractionConfig:
     requests_per_second: float = 2.0  # Rate limit for bulk requests
     request_timeout: int = 60  # Longer timeout for bulk data
     use_dynamic_types: bool = True
-    
+    # Parallel year fetching - fetch multiple years concurrently
+    parallel_year_batches: int = 3  # Number of years to fetch concurrently
+
     def __post_init__(self):
         if not self.api_key:
             raise ValueError(
@@ -86,32 +66,32 @@ class ExtractionConfig:
 
 class TokenBucketRateLimiter:
     """Token bucket for smooth rate limiting."""
-    
+
     def __init__(self, rate: float, burst: int = 5):
         self.rate = rate
         self.burst = burst
         self.tokens = burst
         self.last_update = time.monotonic()
         self._lock = asyncio.Lock()
-    
+
     async def acquire(self):
         async with self._lock:
             now = time.monotonic()
             elapsed = now - self.last_update
             self.tokens = min(self.burst, self.tokens + elapsed * self.rate)
             self.last_update = now
-            
+
             if self.tokens >= 1:
                 self.tokens -= 1
                 return
-            
+
             wait_time = (1 - self.tokens) / self.rate
             await asyncio.sleep(wait_time)
             self.tokens = 0
 
 
 # ============================================================================
-# Dynamic Type Discovery
+# Dynamic Type Discovery (API-First Approach)
 # ============================================================================
 
 async def fetch_record_types_from_api(
@@ -128,8 +108,9 @@ async def fetch_record_types_from_api(
     try:
         async with session.get(f"{base_url}/types", auth=auth) as resp:
             if resp.status != 200:
+                logger.warning(f"Types endpoint returned status {resp.status}")
                 return {}
-            
+
             types_data = await resp.json()
             return {
                 t["code"]: {
@@ -141,7 +122,7 @@ async def fetch_record_types_from_api(
                 if t.get("code")
             }
     except Exception as e:
-        print(f"Warning: Could not fetch types from API: {e}")
+        logger.warning(f"Could not fetch types from API: {e}")
         return {}
 
 
@@ -160,15 +141,16 @@ async def discover_record_types_from_sample_year(
         url = f"{base_url}/data/all/{sample_year}"
         async with session.get(url, auth=auth) as resp:
             if resp.status != 200:
+                logger.warning(f"Sample year endpoint returned status {resp.status}")
                 return set()
-            
+
             data = await resp.json()
             if not isinstance(data, list):
                 return set()
-            
+
             return {r["record"] for r in data if r.get("record")}
     except Exception as e:
-        print(f"Warning: Could not discover types from sample year: {e}")
+        logger.warning(f"Could not discover types from sample year: {e}")
         return set()
 
 
@@ -178,36 +160,48 @@ async def get_available_record_types(
     base_url: str,
 ) -> dict[str, str]:
     """
-    Get all available record types, combining API metadata with discovery.
+    Get all available record types dynamically from the API.
+    
+    Strategy:
+    1. Fetch from /types endpoint (has metadata like descriptions)
+    2. Discover from sample year data (comprehensive list of actual types)
+    3. Combine both sources for complete coverage
+    
+    Returns:
+        Dictionary mapping record type code to description
     """
-    # Fetch from /types endpoint (has metadata)
-    types_metadata = await fetch_record_types_from_api(session, auth, base_url)
-    
-    # Discover from sample year (comprehensive list)
-    discovered_types = await discover_record_types_from_sample_year(session, auth, base_url)
-    
-    # Build result
+    # Fetch metadata from /types endpoint (parallel with discovery)
+    types_task = fetch_record_types_from_api(session, auth, base_url)
+    discovery_task = discover_record_types_from_sample_year(session, auth, base_url)
+
+    types_metadata, discovered_types = await asyncio.gather(types_task, discovery_task)
+
+    # Build result from discovered types with metadata enrichment
     result = {}
-    
+
     for record_type in discovered_types:
-        # Check if we have metadata from /types endpoint
+        # Try to find description from /types endpoint
+        description = record_type  # Default to type name
         for code, meta in types_metadata.items():
             if meta.get("record") == record_type:
-                result[record_type] = meta.get("name", record_type)
+                description = meta.get("name") or record_type
                 break
-        else:
-            result[record_type] = FALLBACK_RECORD_TYPES.get(record_type, record_type)
-    
-    # Fallback if discovery failed
+        result[record_type] = description
+
+    # If discovery found nothing, try to use /types endpoint data
+    if not result and types_metadata:
+        logger.warning("Discovery failed, using /types endpoint data")
+        for code, meta in types_metadata.items():
+            record = meta.get("record", code)
+            result[record] = meta.get("name", record)
+
+    # Log warning if no types found (API might be down)
     if not result:
-        if types_metadata:
-            for code, meta in types_metadata.items():
-                record = meta.get("record", code)
-                result[record] = meta.get("name", record)
-        else:
-            print("Warning: Using fallback record types (API discovery failed)")
-            result = FALLBACK_RECORD_TYPES.copy()
-    
+        logger.error(
+            "CRITICAL: Could not discover any record types from API. "
+            "Check API connectivity and credentials."
+        )
+
     return result
 
 
@@ -216,29 +210,31 @@ _cached_record_types: dict[str, str] | None = None
 
 
 def get_record_types_sync(
-    api_key: str, 
+    api_key: str,
     base_url: str = "https://api.footprintnetwork.org/v1"
 ) -> dict[str, str]:
     """Synchronous wrapper to get record types (with caching)."""
     global _cached_record_types
-    
+
     if _cached_record_types is not None:
         return _cached_record_types
-    
+
     async def _fetch():
         auth = aiohttp.BasicAuth("", api_key)
         connector = aiohttp.TCPConnector(limit=5)
         timeout = aiohttp.ClientTimeout(total=30)
-        
+
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             return await get_available_record_types(session, auth, base_url)
-    
+
     try:
         _cached_record_types = asyncio.run(_fetch())
+        if not _cached_record_types:
+            raise ValueError("No record types discovered from API")
         return _cached_record_types
     except Exception as e:
-        print(f"Warning: Could not fetch record types: {e}")
-        return FALLBACK_RECORD_TYPES.copy()
+        logger.error(f"Failed to fetch record types: {e}")
+        raise
 
 
 def clear_record_types_cache():
@@ -260,14 +256,16 @@ async def fetch_countries(
     async with session.get(f"{base_url}/countries", auth=auth) as resp:
         resp.raise_for_status()
         countries = await resp.json()
-        
+
         extracted_at = datetime.now(timezone.utc).isoformat()
         return [
             {
                 "country_code": c.get("countryCode"),
                 "country_name": c.get("countryName"),
+                "short_name": c.get("shortName"),
                 "iso_alpha2": c.get("isoa2"),
                 "version": c.get("version"),
+                "score": c.get("score"),
                 "extracted_at": extracted_at,
             }
             for c in countries
@@ -292,27 +290,27 @@ async def fetch_year_all_data(
     This is ~200x more efficient than fetching per-country.
     """
     await rate_limiter.acquire()
-    
+
     url = f"{base_url}/data/all/{year}"
-    
+
     for attempt in range(3):
         try:
             async with session.get(url, auth=auth) as resp:
                 if resp.status == 429:
                     retry_after = int(resp.headers.get("Retry-After", 5))
-                    print(f"  Rate limited, waiting {retry_after}s...")
+                    logger.warning(f"Rate limited, waiting {retry_after}s...")
                     await asyncio.sleep(retry_after)
                     continue
-                
+
                 if resp.status != 200:
-                    print(f"  Warning: Year {year} returned status {resp.status}")
+                    logger.warning(f"Year {year} returned status {resp.status}")
                     return []
-                
+
                 data = await resp.json()
                 records = data if isinstance(data, list) else [data]
-                
+
                 extracted_at = datetime.now(timezone.utc).isoformat()
-                
+
                 return [
                     {
                         "country_code": r.get("countryCode"),
@@ -339,21 +337,73 @@ async def fetch_year_all_data(
                     for r in records
                     if r.get("year") and r.get("countryCode")
                 ]
-                
+
         except asyncio.TimeoutError:
-            print(f"  Timeout for year {year}, attempt {attempt + 1}/3")
+            logger.warning(f"Timeout for year {year}, attempt {attempt + 1}/3")
             if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
                 continue
             return []
         except aiohttp.ClientError as e:
-            print(f"  Error for year {year}: {e}")
+            logger.warning(f"Error for year {year}: {e}")
             if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
                 continue
             return []
-    
+
     return []
+
+
+async def fetch_years_parallel(
+    session: aiohttp.ClientSession,
+    auth: aiohttp.BasicAuth,
+    rate_limiter: TokenBucketRateLimiter,
+    base_url: str,
+    years: list[int],
+    record_type_descriptions: dict[str, str],
+    batch_size: int = 3,
+) -> list[dict]:
+    """
+    Fetch multiple years in parallel batches for improved performance.
+    
+    Args:
+        years: List of years to fetch
+        batch_size: Number of years to fetch concurrently
+    
+    Returns:
+        Combined list of all records from all years
+    """
+    all_records = []
+    total_years = len(years)
+    start_time = time.monotonic()
+
+    # Process years in batches
+    for i in range(0, total_years, batch_size):
+        batch = years[i:i + batch_size]
+
+        # Fetch batch in parallel
+        tasks = [
+            fetch_year_all_data(
+                session, auth, rate_limiter,
+                base_url, year, record_type_descriptions
+            )
+            for year in batch
+        ]
+
+        results = await asyncio.gather(*tasks)
+
+        batch_records = 0
+        for year, records in zip(batch, results):
+            all_records.extend(records)
+            batch_records += len(records)
+
+        elapsed = time.monotonic() - start_time
+        completed = min(i + batch_size, total_years)
+        rate = completed / elapsed if elapsed > 0 else 0
+        print(f"  Years {batch[0]}-{batch[-1]}: {batch_records:,} records "
+              f"(total: {len(all_records):,}) - {rate:.1f} years/s")
+
+    return all_records
 
 
 async def extract_all_data(
@@ -368,7 +418,7 @@ async def extract_all_data(
     Strategy: Use /data/all/{year} endpoint which returns ALL countries
     and ALL record types for a year in a single API call.
     
-    For 15 years of data, this requires only ~17 API calls instead of ~3000+.
+    For 64 years of data, this requires only ~66 API calls instead of ~3000+.
     
     Args:
         config: Extraction configuration
@@ -384,65 +434,66 @@ async def extract_all_data(
         rate=config.requests_per_second,
         burst=config.max_concurrent_requests
     )
-    
+
     connector = aiohttp.TCPConnector(limit=10, limit_per_host=5)
     timeout = aiohttp.ClientTimeout(total=config.request_timeout)
-    
+
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        # Step 1: Discover available record types
-        print("Discovering available record types...")
-        if config.use_dynamic_types:
-            available_types = await get_available_record_types(session, auth, config.api_base_url)
-        else:
-            available_types = FALLBACK_RECORD_TYPES.copy()
-        
+        # Step 1: Discover available record types dynamically from API
+        print("Discovering available record types from API...")
+        available_types = await get_available_record_types(session, auth, config.api_base_url)
+
+        if not available_types:
+            raise ValueError(
+                "Could not discover any record types from API. "
+                "Check your API key and network connectivity."
+            )
+
         print(f"  Found {len(available_types)} record types:")
         for rt in sorted(available_types.keys()):
             print(f"    - {rt}: {available_types[rt]}")
-        
+
         # Step 2: Fetch countries (for reference data)
         print("\nFetching countries...")
         countries = await fetch_countries(session, auth, config.api_base_url)
         print(f"  Found {len(countries)} countries")
-        
-        # Step 3: Fetch data year by year using bulk endpoint
+
+        # Step 3: Fetch data year by year using bulk endpoint (with parallel batching)
         years = list(range(start_year, end_year + 1))
         total_years = len(years)
-        
+
         print(f"\nFetching data for {total_years} years ({start_year}-{end_year})...")
-        print(f"  Using bulk endpoint: /data/all/{{year}}")
-        print(f"  Total API calls needed: {total_years}")
-        
-        all_records = []
+        print("  Using bulk endpoint: /data/all/{year}")
+        print(f"  Parallel batch size: {config.parallel_year_batches}")
+        print(f"  Estimated API calls: {total_years}")
+
         start_time = time.monotonic()
-        
-        for i, year in enumerate(years, 1):
-            records = await fetch_year_all_data(
-                session, auth, rate_limiter,
-                config.api_base_url,
-                year,
-                available_types,
-            )
-            
-            # Filter by record_types if specified
-            if record_types:
-                records = [r for r in records if r["record_type"] in record_types]
-            
-            all_records.extend(records)
-            
-            elapsed = time.monotonic() - start_time
-            rate = i / elapsed if elapsed > 0 else 0
-            print(f"  Year {year}: {len(records):,} records (total: {len(all_records):,}) - {rate:.1f} years/s")
-        
+
+        # Use parallel fetching for better performance
+        all_records = await fetch_years_parallel(
+            session, auth, rate_limiter,
+            config.api_base_url,
+            years,
+            available_types,
+            batch_size=config.parallel_year_batches,
+        )
+
+        # Filter by record_types if specified
+        if record_types:
+            original_count = len(all_records)
+            all_records = [r for r in all_records if r["record_type"] in record_types]
+            print(f"\n  Filtered to {len(record_types)} types: {len(all_records):,} records "
+                  f"(from {original_count:,})")
+
         # Collect unique record types found
         found_types = {r["record_type"] for r in all_records if r.get("record_type")}
-        
+
         elapsed = time.monotonic() - start_time
         print(f"\nExtraction complete in {elapsed:.1f}s")
         print(f"  Total records: {len(all_records):,}")
         print(f"  Record types found: {len(found_types)}")
         print(f"  Countries with data: {len(set(r['country_code'] for r in all_records))}")
-        
+
         return {
             "countries": countries,
             "footprint_data": all_records,
@@ -452,6 +503,28 @@ async def extract_all_data(
             ],
             "available_types": available_types,
         }
+
+
+# ============================================================================
+# Exported for backward compatibility
+# ============================================================================
+
+# ALL_RECORD_TYPES is now dynamically populated - use get_record_types_sync()
+def get_all_record_types(api_key: str | None = None) -> dict[str, str]:
+    """
+    Get all available record types from the API.
+    
+    This is the recommended way to get record types - they are discovered
+    dynamically from the API rather than using hardcoded values.
+    """
+    api_key = api_key or os.getenv("GFN_API_KEY")
+    if not api_key:
+        raise ValueError("API key required")
+    return get_record_types_sync(api_key)
+
+
+# Backward compatibility alias
+ALL_RECORD_TYPES = {}  # Populated on first use - call get_all_record_types() instead
 
 
 # ============================================================================
@@ -474,11 +547,11 @@ def gfn_source(
         start_year: First year to extract
         end_year: Last year to extract
         record_types: Optional list of specific record types to extract (None = all)
-        use_dynamic_types: Discover types from API (True) or use fallback (False)
+        use_dynamic_types: Always True - types are discovered from API
     """
-    config = ExtractionConfig(api_key=api_key, use_dynamic_types=use_dynamic_types)
+    config = ExtractionConfig(api_key=api_key, use_dynamic_types=True)
     data = asyncio.run(extract_all_data(config, start_year, end_year, record_types))
-    
+
     yield countries_resource(data["countries"])
     yield record_types_resource(data["record_types"])
     yield footprint_data_resource(data["footprint_data"])
@@ -491,8 +564,10 @@ def gfn_source(
     columns={
         "country_code": {"data_type": "bigint", "nullable": True},
         "country_name": {"data_type": "text", "nullable": True},
+        "short_name": {"data_type": "text", "nullable": True},
         "iso_alpha2": {"data_type": "text", "nullable": True},
         "version": {"data_type": "text", "nullable": True},
+        "score": {"data_type": "text", "nullable": True},
         "extracted_at": {"data_type": "timestamp", "nullable": True},
     },
 )
@@ -512,7 +587,7 @@ def countries_resource(countries: list[dict]) -> Iterator[dict]:
     },
 )
 def record_types_resource(record_types: list[dict]) -> Iterator[dict]:
-    """Record types reference data (dynamically discovered)."""
+    """Record types reference data (dynamically discovered from API)."""
     print(f"Loading {len(record_types)} record types...")
     yield from record_types
 
@@ -568,7 +643,7 @@ def run_pipeline(
         end_year: Last year to extract
         api_key: GFN API key (or set GFN_API_KEY env var)
         record_types: List of specific record types (None = all)
-        use_dynamic_types: Discover types from API (default: True)
+        use_dynamic_types: Always True - types discovered from API
         full_refresh: Replace all data instead of merge
     
     Returns:
@@ -577,49 +652,49 @@ def run_pipeline(
     api_key = api_key or os.getenv("GFN_API_KEY")
     if not api_key:
         raise ValueError("API key required. Set GFN_API_KEY environment variable.")
-    
+
     pipeline = dlt.pipeline(
         pipeline_name="gfn_footprint",
         destination=destination,
         dataset_name="gfn",
     )
-    
+
     source = gfn_source(
         api_key=api_key,
         start_year=start_year,
         end_year=end_year,
         record_types=record_types,
-        use_dynamic_types=use_dynamic_types,
+        use_dynamic_types=True,  # Always use dynamic discovery
     )
-    
+
     if full_refresh:
         source.footprint_data.apply_hints(write_disposition="replace")
         source.countries.apply_hints(write_disposition="replace")
         source.record_types.apply_hints(write_disposition="replace")
-    
+
     years_count = end_year - start_year + 1
-    type_filter = f"{len(record_types)} types" if record_types else "all types"
-    
+    type_filter = f"{len(record_types)} types" if record_types else "all types (dynamic)"
+
     print(f"\n{'='*70}")
-    print(f"GFN Pipeline - Bulk Extraction")
+    print("GFN Pipeline - Bulk Extraction")
     print(f"{'='*70}")
     print(f"Destination:    {destination}")
     print(f"Years:          {start_year}-{end_year} ({years_count} years)")
-    print(f"Record Types:   {type_filter} (dynamic discovery: {use_dynamic_types})")
+    print(f"Record Types:   {type_filter}")
     print(f"Mode:           {'Full Refresh' if full_refresh else 'Incremental Merge'}")
     print(f"API Calls:      ~{years_count + 2} (bulk endpoint)")
     print(f"{'='*70}\n")
-    
+
     start_time = time.monotonic()
     load_info = pipeline.run(source)
     elapsed = time.monotonic() - start_time
-    
+
     print(f"\n{'='*70}")
     print(f"COMPLETE in {elapsed:.1f}s")
     print(f"{'='*70}")
     print(load_info)
     print(f"\nPipeline state: {pipeline.pipelines_dir}")
-    
+
     return pipeline
 
 
@@ -629,7 +704,7 @@ def run_pipeline(
 
 if __name__ == "__main__":
     import argparse
-    
+
     parser = argparse.ArgumentParser(
         description="GFN Data Pipeline - Bulk Extraction with Dynamic Type Discovery",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -638,21 +713,18 @@ Extraction Strategy:
   Uses the efficient /data/all/{year} bulk endpoint which returns ALL
   countries and ALL record types for a year in a single API call.
   
-  For 15 years of data, this requires only ~17 API calls instead of ~3000+.
+  For 64 years of data (1961-2024), this requires only ~66 API calls 
+  instead of ~3000+ with per-country fetching.
 
-Available Record Types (dynamically discovered):
-  Footprint (Consumption):  EFConsTotGHA, EFConsPerCap
-  Footprint (Production):   EFProdTotGHA, EFProdPerCap  
-  Footprint (Trade):        EFExportsTotGHA, EFImportsTotGHA, etc.
-  Biocapacity:              BiocapTotGHA, BiocapPerCap
-  Area:                     AreaTotHA, AreaPerCap
-  Supplementary:            Population, HDI, GDP-USD, GDP-PPP, Earths
+Record Types:
+  Record types are discovered DYNAMICALLY from the API - no hardcoded values.
+  Use --list-types to see currently available types.
 
 Examples:
   # Extract ALL data (recommended)
   python -m gfn_pipeline.pipeline_async
   
-  # List available record types
+  # List available record types from API
   python -m gfn_pipeline.pipeline_async --list-types
   
   # Extract specific record types only
@@ -660,6 +732,9 @@ Examples:
   
   # Extract specific year range
   python -m gfn_pipeline.pipeline_async --start-year 2015 --end-year 2020
+  
+  # Full historical extraction
+  python -m gfn_pipeline.pipeline_async --start-year 1961 --end-year 2024
   
   # Load to Snowflake
   python -m gfn_pipeline.pipeline_async --destination snowflake
@@ -684,40 +759,35 @@ Examples:
     parser.add_argument(
         "--record-types",
         nargs="+",
-        help="Specific record types to extract (default: all)",
-    )
-    parser.add_argument(
-        "--no-dynamic-types",
-        action="store_true",
-        help="Use fallback types instead of API discovery",
+        help="Specific record types to extract (default: all from API)",
     )
     parser.add_argument(
         "--list-types",
         action="store_true",
-        help="List available record types and exit",
+        help="List available record types from API and exit",
     )
     args = parser.parse_args()
-    
+
     # Handle --list-types
     if args.list_types:
         api_key = os.getenv("GFN_API_KEY")
         if not api_key:
             print("Error: GFN_API_KEY environment variable required")
             exit(1)
-        
+
         print("Discovering available record types from API...\n")
         types = get_record_types_sync(api_key)
-        
+
         print(f"Found {len(types)} record types:\n")
         for rt in sorted(types.keys()):
             print(f"  {rt:20} - {types[rt]}")
         exit(0)
-    
+
     run_pipeline(
         destination=args.destination,
         start_year=args.start_year,
         end_year=args.end_year,
         record_types=args.record_types,
-        use_dynamic_types=not args.no_dynamic_types,
+        use_dynamic_types=True,
         full_refresh=args.full_refresh,
     )

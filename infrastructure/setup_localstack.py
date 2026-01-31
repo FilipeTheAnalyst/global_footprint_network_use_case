@@ -84,14 +84,14 @@ def get_client(service: str):
 def setup_s3():
     """Create S3 bucket with folder structure."""
     s3 = get_client("s3")
-    
+
     # Create bucket
     try:
         s3.create_bucket(Bucket=S3_BUCKET)
         print(f"✓ Created S3 bucket: {S3_BUCKET}")
     except s3.exceptions.BucketAlreadyExists:
         print(f"  S3 bucket already exists: {S3_BUCKET}")
-    
+
     # Create folder structure (placeholder files - LocalStack 3.0 has bug with empty objects)
     folders = [
         "raw/carbon_footprint/.keep",
@@ -106,7 +106,7 @@ def setup_s3():
 def setup_sqs():
     """Create SQS queues with DLQ configuration."""
     sqs = get_client("sqs")
-    
+
     # Create DLQ first
     dlq_response = sqs.create_queue(
         QueueName=SQS_DLQ,
@@ -116,13 +116,13 @@ def setup_sqs():
     )
     dlq_arn = f"arn:aws:sqs:{AWS_REGION}:{AWS_ACCOUNT_ID}:{SQS_DLQ}"
     print(f"✓ Created DLQ: {SQS_DLQ}")
-    
+
     # Redrive policy for main queues
     redrive_policy = json.dumps({
         "deadLetterTargetArn": dlq_arn,
         "maxReceiveCount": 3,
     })
-    
+
     # Create processing queues
     queues = [SQS_EXTRACT_QUEUE, SQS_TRANSFORM_QUEUE, SQS_LOAD_QUEUE]
     for queue_name in queues:
@@ -139,26 +139,26 @@ def setup_sqs():
 def setup_sns():
     """Create SNS topic for notifications."""
     sns = get_client("sns")
-    
+
     response = sns.create_topic(Name=SNS_NOTIFICATIONS)
     topic_arn = response["TopicArn"]
     print(f"✓ Created SNS topic: {SNS_NOTIFICATIONS}")
-    
+
     # Subscribe SQS DLQ to receive failure notifications
     sns.subscribe(
         TopicArn=topic_arn,
         Protocol="sqs",
         Endpoint=f"arn:aws:sqs:{AWS_REGION}:{AWS_ACCOUNT_ID}:{SQS_DLQ}",
     )
-    print(f"✓ Subscribed DLQ to notifications")
-    
+    print("✓ Subscribed DLQ to notifications")
+
     return topic_arn
 
 
 def setup_eventbridge():
     """Create EventBridge rule for scheduled extraction."""
     events = get_client("events")
-    
+
     # Daily extraction at 6 AM UTC
     rule_name = "gfn-daily-extraction"
     events.put_rule(
@@ -168,7 +168,7 @@ def setup_eventbridge():
         Description="Daily GFN carbon footprint extraction",
     )
     print(f"✓ Created EventBridge rule: {rule_name}")
-    
+
     # Target: SQS extract queue
     events.put_targets(
         Rule=rule_name,
@@ -185,15 +185,15 @@ def setup_eventbridge():
             }
         ],
     )
-    print(f"✓ Added SQS target to rule")
+    print("✓ Added SQS target to rule")
 
 
 def setup_iam_role():
     """Create IAM role for Lambda execution."""
     iam = get_client("iam")
-    
+
     role_name = "gfn-lambda-execution-role"
-    
+
     # Trust policy allowing Lambda to assume the role
     trust_policy = {
         "Version": "2012-10-17",
@@ -205,7 +205,7 @@ def setup_iam_role():
             }
         ],
     }
-    
+
     try:
         iam.create_role(
             RoleName=role_name,
@@ -215,7 +215,7 @@ def setup_iam_role():
         print(f"✓ Created IAM role: {role_name}")
     except iam.exceptions.EntityAlreadyExistsException:
         print(f"  IAM role already exists: {role_name}")
-    
+
     # Attach policies for S3, SQS, SNS, CloudWatch access
     policy_document = {
         "Version": "2012-10-17",
@@ -258,17 +258,17 @@ def setup_iam_role():
             },
         ],
     }
-    
+
     try:
         iam.put_role_policy(
             RoleName=role_name,
             PolicyName="gfn-lambda-policy",
             PolicyDocument=json.dumps(policy_document),
         )
-        print(f"✓ Attached policy to role")
+        print("✓ Attached policy to role")
     except Exception as e:
         print(f"  Policy attachment skipped: {e}")
-    
+
     return f"arn:aws:iam::{AWS_ACCOUNT_ID}:role/{role_name}"
 
 
@@ -283,15 +283,15 @@ def create_lambda_package(include_dependencies: bool = True) -> str:
     Returns the path to the ZIP file.
     """
     project_root = Path(__file__).parent.parent
-    
+
     # Create a temporary directory for the package
     temp_dir = tempfile.mkdtemp(prefix="lambda_package_")
     package_dir = os.path.join(temp_dir, "package")
     os.makedirs(package_dir)
     zip_path = os.path.join(temp_dir, "lambda_package.zip")
-    
+
     print("  Packaging Lambda code...")
-    
+
     # Install dependencies if requested
     if include_dependencies:
         print("  Installing dependencies (this may take a moment)...")
@@ -304,7 +304,7 @@ def create_lambda_package(include_dependencies: bool = True) -> str:
             "pydantic-settings",
             "python-dotenv",
         ]
-        
+
         # Install to package directory
         result = subprocess.run(
             ["uv", "pip", "install", "--target", package_dir] + dependencies,
@@ -312,27 +312,27 @@ def create_lambda_package(include_dependencies: bool = True) -> str:
             text=True,
             cwd=str(project_root),
         )
-        
+
         if result.returncode != 0:
             print(f"  Warning: Some dependencies may have failed: {result.stderr[:200]}")
-    
+
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         # Add lambda_handlers.py at root level
         handlers_path = project_root / "infrastructure" / "lambda_handlers.py"
         if handlers_path.exists():
             zf.write(handlers_path, "lambda_handlers.py")
-        
+
         # Add src/gfn_pipeline module
         src_path = project_root / "src" / "gfn_pipeline"
         if src_path.exists():
             for file_path in src_path.rglob("*.py"):
                 arcname = f"gfn_pipeline/{file_path.relative_to(src_path)}"
                 zf.write(file_path, arcname)
-        
+
         # Add __init__.py for gfn_pipeline if not exists
         if not (src_path / "__init__.py").exists():
             zf.writestr("gfn_pipeline/__init__.py", "")
-        
+
         # Add installed dependencies
         if include_dependencies and os.path.exists(package_dir):
             for root, dirs, files in os.walk(package_dir):
@@ -344,24 +344,24 @@ def create_lambda_package(include_dependencies: bool = True) -> str:
                     file_path = os.path.join(root, file)
                     arcname = os.path.relpath(file_path, package_dir)
                     zf.write(file_path, arcname)
-    
+
     package_size = os.path.getsize(zip_path)
     print(f"  Package created: {package_size / 1024 / 1024:.1f} MB")
-    
+
     return zip_path
 
 
 def setup_lambda_functions(role_arn: str):
     """Deploy Lambda functions to LocalStack."""
     lambda_client = get_client("lambda")
-    
+
     # Create deployment package
     zip_path = create_lambda_package()
-    
+
     try:
         with open(zip_path, "rb") as f:
             zip_content = f.read()
-        
+
         for function_name, config in LAMBDA_FUNCTIONS.items():
             try:
                 # Check if function exists
@@ -404,18 +404,18 @@ def setup_lambda_functions(role_arn: str):
 def setup_lambda_triggers():
     """Configure Lambda triggers (SQS, S3 events)."""
     lambda_client = get_client("lambda")
-    
+
     # Map queues to Lambda functions
     triggers = [
         (SQS_EXTRACT_QUEUE, "gfn-extract"),
         (SQS_TRANSFORM_QUEUE, "gfn-transform"),
         (SQS_LOAD_QUEUE, "gfn-load"),
     ]
-    
+
     for queue_name, function_name in triggers:
         try:
             queue_arn = f"arn:aws:sqs:{AWS_REGION}:{AWS_ACCOUNT_ID}:{queue_name}"
-            
+
             # Create event source mapping
             lambda_client.create_event_source_mapping(
                 EventSourceArn=queue_arn,
@@ -434,7 +434,7 @@ def setup_lambda_triggers():
 def setup_step_functions():
     """Create Step Functions state machine for orchestration."""
     sfn = get_client("stepfunctions")
-    
+
     # State machine definition
     definition = {
         "Comment": "GFN Pipeline Orchestration",
@@ -533,14 +533,14 @@ def setup_step_functions():
             },
         },
     }
-    
+
     try:
         sfn.create_state_machine(
             name="gfn-pipeline-orchestrator",
             definition=json.dumps(definition),
             roleArn=f"arn:aws:iam::{AWS_ACCOUNT_ID}:role/step-functions-role",
         )
-        print(f"✓ Created Step Functions state machine")
+        print("✓ Created Step Functions state machine")
     except Exception as e:
         print(f"  Step Functions setup skipped: {e}")
 
@@ -549,7 +549,7 @@ def setup_cloudwatch():
     """Create CloudWatch log groups and alarms."""
     logs = get_client("logs")
     cloudwatch = get_client("cloudwatch")
-    
+
     # Log groups
     log_groups = [
         "/aws/lambda/gfn-extract",
@@ -557,14 +557,14 @@ def setup_cloudwatch():
         "/aws/lambda/gfn-load",
         "/gfn/pipeline",
     ]
-    
+
     for log_group in log_groups:
         try:
             logs.create_log_group(logGroupName=log_group)
             print(f"✓ Created log group: {log_group}")
         except logs.exceptions.ResourceAlreadyExistsException:
             pass
-    
+
     # Alarm for DLQ messages (failures)
     # Note: CloudWatch alarms have limited support in LocalStack Community
     try:
@@ -580,7 +580,7 @@ def setup_cloudwatch():
             ComparisonOperator="GreaterThanOrEqualToThreshold",
             AlarmDescription="Alert when messages appear in DLQ",
         )
-        print(f"✓ Created CloudWatch alarm for DLQ")
+        print("✓ Created CloudWatch alarm for DLQ")
     except Exception as e:
         print(f"  Skipping CloudWatch alarm (not fully supported in LocalStack Community): {type(e).__name__}")
 
@@ -638,7 +638,7 @@ Test Commands:
 def setup_s3_notifications():
     """Configure S3 event notifications (must be called after SQS setup)."""
     s3 = get_client("s3")
-    
+
     # Enable event notifications (for transform trigger)
     s3.put_bucket_notification_configuration(
         Bucket=S3_BUCKET,
@@ -659,13 +659,13 @@ def setup_s3_notifications():
             ]
         },
     )
-    print(f"✓ Configured S3 event notifications")
+    print("✓ Configured S3 event notifications")
 
 
 def main():
     """Setup all LocalStack infrastructure."""
     print("Setting up LocalStack infrastructure...\n")
-    
+
     # Core infrastructure
     setup_s3()                    # Create bucket and folders
     setup_sqs()                   # Create queues (needed for S3 notifications)
@@ -673,16 +673,16 @@ def main():
     setup_sns()
     setup_eventbridge()
     setup_cloudwatch()
-    
+
     # Lambda deployment
     print("\nDeploying Lambda functions...")
     role_arn = setup_iam_role()   # Create execution role
     setup_lambda_functions(role_arn)  # Deploy Lambda code
     setup_lambda_triggers()       # Configure SQS -> Lambda triggers
-    
+
     # Orchestration
     setup_step_functions()
-    
+
     print_summary()
 
 

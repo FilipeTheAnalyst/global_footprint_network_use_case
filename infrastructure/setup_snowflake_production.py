@@ -98,16 +98,16 @@ def get_aws_client(service: str):
     """Get boto3 client, using LocalStack if configured."""
     if not HAS_BOTO3:
         raise ImportError("boto3 not installed")
-    
+
     kwargs = {"region_name": AWS_REGION}
-    
+
     if USE_LOCALSTACK:
         kwargs["endpoint_url"] = LOCALSTACK_ENDPOINT
         kwargs["aws_access_key_id"] = "test"
         kwargs["aws_secret_access_key"] = "test"
         if service == "s3":
             kwargs["config"] = Config(signature_version="s3v4")
-    
+
     return boto3.client(service, **kwargs)
 
 
@@ -140,13 +140,13 @@ def prompt_for_value(name: str, current_value: str | None, secret: bool = False)
             display = current_value
         print(f"  {name}: {display}")
         return current_value
-    
+
     if secret:
         import getpass
         value = getpass.getpass(f"  Enter {name}: ")
     else:
         value = input(f"  Enter {name}: ")
-    
+
     return value.strip()
 
 
@@ -167,7 +167,7 @@ def get_snowflake_connection():
     """Get Snowflake connection."""
     if not HAS_SNOWFLAKE:
         raise ImportError("snowflake-connector-python not installed. Run: uv add snowflake-connector-python")
-    
+
     return snowflake.connector.connect(
         account=SNOWFLAKE_ACCOUNT,
         user=SNOWFLAKE_USER,
@@ -204,18 +204,18 @@ def check_localstack_running() -> bool:
 def setup_localstack_resources():
     """Setup AWS resources in LocalStack for Snowflake integration."""
     print("Setting up LocalStack resources...")
-    
+
     if not check_localstack_running():
         print("  ✗ LocalStack is not running!")
         print("  Start it with: make localstack-up")
         return False
-    
+
     # Use boto3 with LocalStack endpoint
     s3 = get_aws_client("s3")
     iam = get_aws_client("iam")
     sns = get_aws_client("sns")
     sqs = get_aws_client("sqs")
-    
+
     # 1. Create S3 bucket if not exists
     try:
         s3.create_bucket(Bucket=S3_BUCKET)
@@ -226,12 +226,12 @@ def setup_localstack_resources():
         print(f"  ✓ S3 bucket exists: {S3_BUCKET}")
     except Exception as e:
         print(f"  ✓ S3 bucket: {S3_BUCKET} ({e})")
-    
+
     # Create folder structure
     for prefix in ["raw/gfn_footprint_data/", "processed/gfn_footprint_data/", "failed/"]:
         s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}.keep", Body=b"placeholder")
-    print(f"  ✓ Created S3 folder structure")
-    
+    print("  ✓ Created S3 folder structure")
+
     # 2. Create IAM role for Snowflake
     role_name = "gfn-snowflake-role"
     trust_policy = {
@@ -244,7 +244,7 @@ def setup_localstack_resources():
             }
         ],
     }
-    
+
     try:
         iam.create_role(
             RoleName=role_name,
@@ -257,7 +257,7 @@ def setup_localstack_resources():
             print(f"  ✓ IAM role exists: {role_name}")
         else:
             print(f"  ⚠ IAM role: {e}")
-    
+
     # Attach S3 policy to role
     s3_policy = {
         "Version": "2012-10-17",
@@ -272,27 +272,27 @@ def setup_localstack_resources():
             }
         ],
     }
-    
+
     try:
         iam.put_role_policy(
             RoleName=role_name,
             PolicyName="snowflake-s3-access",
             PolicyDocument=json.dumps(s3_policy),
         )
-        print(f"  ✓ Attached S3 policy to role")
+        print("  ✓ Attached S3 policy to role")
     except Exception as e:
         print(f"  ⚠ Policy attachment: {e}")
-    
+
     # 3. Create SNS topic for Snowpipe notifications
     topic_name = "gfn-snowpipe-notifications"
     try:
         response = sns.create_topic(Name=topic_name)
         topic_arn = response["TopicArn"]
         print(f"  ✓ Created SNS topic: {topic_name}")
-    except Exception as e:
+    except Exception:
         topic_arn = f"arn:aws:sns:{AWS_REGION}:{AWS_ACCOUNT_ID}:{topic_name}"
         print(f"  ✓ SNS topic: {topic_name}")
-    
+
     # 4. Create SQS queue (simulating Snowpipe's managed queue)
     queue_name = "gfn-snowpipe-queue"
     queue_arn = f"arn:aws:sqs:{AWS_REGION}:{AWS_ACCOUNT_ID}:{queue_name}"
@@ -300,10 +300,10 @@ def setup_localstack_resources():
         response = sqs.create_queue(QueueName=queue_name)
         queue_url = response["QueueUrl"]
         print(f"  ✓ Created SQS queue: {queue_name}")
-    except Exception as e:
+    except Exception:
         queue_url = f"{LOCALSTACK_ENDPOINT}/000000000000/{queue_name}"
         print(f"  ✓ SQS queue: {queue_name}")
-    
+
     # 4b. Subscribe SQS to SNS (so S3 events flow: S3 → SNS → SQS)
     try:
         sns.subscribe(
@@ -311,10 +311,10 @@ def setup_localstack_resources():
             Protocol="sqs",
             Endpoint=queue_arn,
         )
-        print(f"  ✓ Subscribed SQS to SNS topic")
+        print("  ✓ Subscribed SQS to SNS topic")
     except Exception as e:
         print(f"  ⚠ SNS subscription: {e}")
-    
+
     # 5. Configure S3 event notifications to SNS
     try:
         s3.put_bucket_notification_configuration(
@@ -336,18 +336,18 @@ def setup_localstack_resources():
                 ]
             },
         )
-        print(f"  ✓ Configured S3 → SNS notifications")
+        print("  ✓ Configured S3 → SNS notifications")
     except Exception as e:
         print(f"  ⚠ S3 notifications: {e}")
-    
+
     role_arn = f"arn:aws:iam::{AWS_ACCOUNT_ID}:role/{role_name}"
-    
-    print(f"\n  LocalStack Resources Ready:")
+
+    print("\n  LocalStack Resources Ready:")
     print(f"    S3 Bucket: s3://{S3_BUCKET}")
     print(f"    IAM Role: {role_arn}")
     print(f"    SNS Topic: {topic_arn}")
     print(f"    SQS Queue: {queue_arn} (simulates Snowpipe)")
-    
+
     return True
 
 
@@ -359,15 +359,15 @@ def deploy_cloudformation_stack() -> dict:
         print("  Using direct resource creation (LocalStack mode)")
         setup_localstack_resources()
         return {"RoleArn": f"arn:aws:iam::{AWS_ACCOUNT_ID}:role/gfn-snowflake-role"}
-    
+
     print("Deploying CloudFormation stack...")
-    
+
     template_path = AWS_DIR / "snowpipe_iam_role.json"
     if not template_path.exists():
         raise FileNotFoundError(f"CloudFormation template not found: {template_path}")
-    
+
     aws_cmd = get_aws_command_prefix()
-    
+
     # Check if stack already exists
     code, output = run_command(
         aws_cmd + [
@@ -375,12 +375,12 @@ def deploy_cloudformation_stack() -> dict:
             "--stack-name", CLOUDFORMATION_STACK_NAME,
             "--region", AWS_REGION,
         ], capture=True)
-    
+
     # Common parameters for stack
     stack_params = [
         f"ParameterKey=S3BucketName,ParameterValue={S3_BUCKET}",
     ]
-    
+
     if code == 0:
         print(f"  Stack '{CLOUDFORMATION_STACK_NAME}' already exists")
         # Update stack - use previous values for Snowflake params
@@ -395,7 +395,7 @@ def deploy_cloudformation_stack() -> dict:
                 "--capabilities", "CAPABILITY_NAMED_IAM",
                 "--region", AWS_REGION,
             ], capture=True)
-        
+
         if "No updates are to be performed" in output:
             print("  No updates needed")
         elif code != 0:
@@ -411,10 +411,10 @@ def deploy_cloudformation_stack() -> dict:
                 "--capabilities", "CAPABILITY_NAMED_IAM",
                 "--region", AWS_REGION,
             ], capture=True)
-        
+
         if code != 0:
             raise RuntimeError(f"Failed to create stack: {output}")
-        
+
         print("  Waiting for stack creation...")
         run_command(
             aws_cmd + [
@@ -423,7 +423,7 @@ def deploy_cloudformation_stack() -> dict:
                 "--region", AWS_REGION,
             ])
         print("  ✓ Stack created (trust policy uses placeholder - will be updated after Snowflake setup)")
-    
+
     # Get stack outputs
     code, output = run_command(
         aws_cmd + [
@@ -433,14 +433,14 @@ def deploy_cloudformation_stack() -> dict:
             "--query", "Stacks[0].Outputs",
             "--output", "json",
         ], capture=True)
-    
+
     if code == 0:
         try:
             outputs = json.loads(output)
             return {o["OutputKey"]: o["OutputValue"] for o in outputs}
         except (json.JSONDecodeError, KeyError):
             pass
-    
+
     return {}
 
 
@@ -448,7 +448,7 @@ def get_iam_role_arn() -> str:
     """Get the IAM role ARN from CloudFormation stack."""
     if USE_LOCALSTACK:
         return f"arn:aws:iam::{AWS_ACCOUNT_ID}:role/gfn-snowflake-role"
-    
+
     aws_cmd = get_aws_command_prefix()
     code, output = run_command(
         aws_cmd + [
@@ -458,10 +458,10 @@ def get_iam_role_arn() -> str:
             "--query", "Stacks[0].Outputs[?OutputKey=='RoleArn'].OutputValue",
             "--output", "text",
         ], capture=True)
-    
+
     if code == 0 and output.strip():
         return output.strip()
-    
+
     # Fallback to constructed ARN
     return f"arn:aws:iam::{AWS_ACCOUNT_ID}:role/gfn-snowflake-role"
 
@@ -469,12 +469,12 @@ def get_iam_role_arn() -> str:
 def configure_s3_notifications(sqs_arn: str):
     """Configure S3 bucket to send events to Snowpipe SQS."""
     print(f"Configuring S3 notifications to: {sqs_arn}")
-    
+
     if USE_LOCALSTACK:
         # Already configured in setup_localstack_resources
         print("  ✓ S3 notifications already configured (LocalStack mode)")
         return
-    
+
     notification_config = {
         "QueueConfigurations": [
             {
@@ -491,12 +491,12 @@ def configure_s3_notifications(sqs_arn: str):
             }
         ]
     }
-    
+
     # Write config to temp file
     config_file = "/tmp/s3_notification_config.json"
     with open(config_file, "w") as f:
         json.dump(notification_config, f)
-    
+
     aws_cmd = get_aws_command_prefix()
     code, output = run_command(
         aws_cmd + [
@@ -505,10 +505,10 @@ def configure_s3_notifications(sqs_arn: str):
             "--notification-configuration", f"file://{config_file}",
             "--region", AWS_REGION,
         ], capture=True)
-    
+
     if code != 0:
         print(f"  Warning: Failed to configure S3 notifications: {output[:200]}")
-        print(f"  You may need to configure this manually in the AWS Console")
+        print("  You may need to configure this manually in the AWS Console")
     else:
         print("  ✓ S3 notifications configured")
 
@@ -519,10 +519,10 @@ def update_lambda_environment():
     Merges new variables with existing ones to preserve GFN_API_KEY etc.
     """
     print("Updating Lambda environment variables...")
-    
+
     # Load GFN_API_KEY from environment
     gfn_api_key = os.getenv("GFN_API_KEY", "")
-    
+
     env_vars = {
         "SNOWFLAKE_WAREHOUSE": SNOWFLAKE_WAREHOUSE,
         "SNOWFLAKE_DATABASE": SNOWFLAKE_DATABASE,
@@ -530,7 +530,7 @@ def update_lambda_environment():
         "S3_BUCKET": S3_BUCKET,
         "GFN_API_KEY": gfn_api_key,
     }
-    
+
     # Only add Snowflake credentials if provided (not for LocalStack-only setup)
     if SNOWFLAKE_ACCOUNT:
         env_vars["SNOWFLAKE_ACCOUNT"] = SNOWFLAKE_ACCOUNT
@@ -538,23 +538,23 @@ def update_lambda_environment():
         env_vars["SNOWFLAKE_USER"] = SNOWFLAKE_USER
     if SNOWFLAKE_PASSWORD:
         env_vars["SNOWFLAKE_PASSWORD"] = SNOWFLAKE_PASSWORD
-    
+
     if USE_LOCALSTACK:
         env_vars["AWS_ENDPOINT_URL"] = "http://host.docker.internal:4566"
-    
+
     # Use boto3 for Lambda updates
     try:
         lambda_client = get_aws_client("lambda")
-        
+
         for function_name in ["gfn-extract", "gfn-transform", "gfn-load"]:
             try:
                 # Get existing environment variables
                 response = lambda_client.get_function_configuration(FunctionName=function_name)
                 existing_vars = response.get("Environment", {}).get("Variables", {})
-                
+
                 # Merge: existing vars + new vars (new vars take precedence)
                 merged_vars = {**existing_vars, **{k: v for k, v in env_vars.items() if v}}
-                
+
                 lambda_client.update_function_configuration(
                     FunctionName=function_name,
                     Environment={"Variables": merged_vars},
@@ -577,61 +577,61 @@ def prepare_sql_scripts() -> list[Path]:
         SNOWFLAKE_SQL_DIR / "02_snowpipe.sql",
         SNOWFLAKE_SQL_DIR / "03_monitoring.sql",
     ]
-    
+
     prepared_scripts = []
-    
+
     for script in scripts:
         if not script.exists():
             print(f"  Warning: Script not found: {script}")
             continue
-        
+
         content = script.read_text()
-        
+
         # Replace placeholders
         content = content.replace("<YOUR_AWS_ACCOUNT_ID>", AWS_ACCOUNT_ID or "REPLACE_ME")
         content = content.replace("COMPUTE_WH", SNOWFLAKE_WAREHOUSE)
-        
+
         # Write to temp file
         prepared_path = Path(f"/tmp/{script.name}")
         prepared_path.write_text(content)
         prepared_scripts.append(prepared_path)
-        
+
         print(f"  ✓ Prepared {script.name}")
-    
+
     return prepared_scripts
 
 
 def run_snowflake_scripts(scripts: list[Path]) -> dict:
     """Run Snowflake SQL scripts and return important values."""
     print("Connecting to Snowflake...")
-    
+
     conn = get_snowflake_connection()
     cursor = conn.cursor()
-    
+
     results = {
         "storage_aws_iam_user_arn": None,
         "storage_aws_external_id": None,
         "snowpipe_sqs_arn": None,
     }
-    
+
     try:
         for script in scripts:
             print(f"\n  Running {script.name}...")
-            
+
             content = script.read_text()
-            
+
             # Split into individual statements
             statements = [s.strip() for s in content.split(";") if s.strip()]
-            
+
             for i, stmt in enumerate(statements):
                 # Skip comments-only statements
-                if all(line.strip().startswith("--") or not line.strip() 
+                if all(line.strip().startswith("--") or not line.strip()
                        for line in stmt.split("\n")):
                     continue
-                
+
                 try:
                     cursor.execute(stmt)
-                    
+
                     # Check for specific queries we need results from
                     if "DESC STORAGE INTEGRATION" in stmt.upper():
                         rows = cursor.fetchall()
@@ -640,7 +640,7 @@ def run_snowflake_scripts(scripts: list[Path]) -> dict:
                                 results["storage_aws_iam_user_arn"] = row[1]
                             elif row[0] == "STORAGE_AWS_EXTERNAL_ID":
                                 results["storage_aws_external_id"] = row[1]
-                    
+
                     elif "SHOW PIPES" in stmt.upper():
                         rows = cursor.fetchall()
                         if rows:
@@ -652,7 +652,7 @@ def run_snowflake_scripts(scripts: list[Path]) -> dict:
                                         if val and "sqs" in str(val).lower():
                                             results["snowpipe_sqs_arn"] = str(val)
                                             break
-                    
+
                 except Exception as e:
                     # Some statements may fail if objects already exist
                     error_msg = str(e)
@@ -662,13 +662,13 @@ def run_snowflake_scripts(scripts: list[Path]) -> dict:
                         pass
                     else:
                         print(f"    Warning: {error_msg[:100]}")
-            
+
             print(f"    ✓ Completed {script.name}")
-    
+
     finally:
         cursor.close()
         conn.close()
-    
+
     return results
 
 
@@ -679,7 +679,7 @@ def update_iam_trust_policy(snowflake_iam_arn: str, external_id: str):
     to direct IAM API call.
     """
     print("Updating IAM role trust policy...")
-    
+
     if USE_LOCALSTACK:
         # LocalStack: use direct IAM update
         try:
@@ -706,11 +706,11 @@ def update_iam_trust_policy(snowflake_iam_arn: str, external_id: str):
         except Exception as e:
             print(f"  Warning: Failed to update trust policy: {e}")
             return
-    
+
     # Try CloudFormation update first
     aws_cmd = get_aws_command_prefix()
     template_path = AWS_DIR / "snowpipe_iam_role.json"
-    
+
     code, output = run_command(
         aws_cmd + [
             "cloudformation", "update-stack",
@@ -723,7 +723,7 @@ def update_iam_trust_policy(snowflake_iam_arn: str, external_id: str):
             "--capabilities", "CAPABILITY_NAMED_IAM",
             "--region", AWS_REGION,
         ], capture=True)
-    
+
     if code == 0:
         print("  Waiting for stack update...")
         run_command(
@@ -734,11 +734,11 @@ def update_iam_trust_policy(snowflake_iam_arn: str, external_id: str):
             ])
         print("  ✓ Trust policy updated via CloudFormation")
         return
-    
+
     if "No updates are to be performed" in output:
         print("  ✓ Trust policy already up to date")
         return
-    
+
     # Fallback to direct IAM update
     print("  CloudFormation update failed, trying direct IAM update...")
     trust_policy = {
@@ -758,22 +758,22 @@ def update_iam_trust_policy(snowflake_iam_arn: str, external_id: str):
             }
         ]
     }
-    
+
     # Write to temp file
     policy_file = "/tmp/trust_policy.json"
     with open(policy_file, "w") as f:
         json.dump(trust_policy, f)
-    
+
     code, output = run_command(
         aws_cmd + [
             "iam", "update-assume-role-policy",
             "--role-name", "gfn-snowflake-role",
             "--policy-document", f"file://{policy_file}",
         ], capture=True)
-    
+
     if code != 0:
         print(f"  Warning: Failed to update trust policy: {output[:200]}")
-        print(f"  Please update manually with:")
+        print("  Please update manually with:")
         print(f"    Snowflake IAM ARN: {snowflake_iam_arn}")
         print(f"    External ID: {external_id}")
     else:
@@ -787,26 +787,26 @@ def update_iam_trust_policy(snowflake_iam_arn: str, external_id: str):
 def verify_storage_integration() -> bool:
     """Verify Snowflake storage integration is working."""
     print("Verifying storage integration...")
-    
+
     try:
         conn = get_snowflake_connection()
         cursor = conn.cursor()
-        
+
         cursor.execute("DESC STORAGE INTEGRATION gfn_s3_integration")
         rows = cursor.fetchall()
-        
+
         for row in rows:
             if row[0] == "ENABLED" and row[1] == "true":
                 print("  ✓ Storage integration is enabled")
                 cursor.close()
                 conn.close()
                 return True
-        
+
         print("  ✗ Storage integration is not enabled")
         cursor.close()
         conn.close()
         return False
-        
+
     except Exception as e:
         print(f"  ✗ Error: {e}")
         return False
@@ -815,29 +815,29 @@ def verify_storage_integration() -> bool:
 def verify_snowpipe() -> bool:
     """Verify Snowpipe is configured correctly."""
     print("Verifying Snowpipe...")
-    
+
     try:
         conn = get_snowflake_connection()
         cursor = conn.cursor()
-        
+
         cursor.execute("SELECT SYSTEM$PIPE_STATUS('GFN.RAW.GFN_FOOTPRINT_DATA_PIPE')")
         result = cursor.fetchone()
-        
+
         if result:
             status = json.loads(result[0])
             print(f"  Pipe status: {status.get('executionState', 'unknown')}")
-            
+
             if status.get("executionState") == "RUNNING":
                 print("  ✓ Snowpipe is running")
                 cursor.close()
                 conn.close()
                 return True
-        
+
         print("  ⚠ Snowpipe may not be fully configured")
         cursor.close()
         conn.close()
         return False
-        
+
     except Exception as e:
         print(f"  ✗ Error: {e}")
         return False
@@ -846,21 +846,21 @@ def verify_snowpipe() -> bool:
 def verify_s3_access() -> bool:
     """Verify Snowflake can access S3."""
     print("Verifying S3 access from Snowflake...")
-    
+
     try:
         conn = get_snowflake_connection()
         cursor = conn.cursor()
-        
+
         cursor.execute("USE DATABASE GFN")
         cursor.execute("USE SCHEMA RAW")
         cursor.execute("LIST @gfn_processed_stage")
         rows = cursor.fetchall()
-        
+
         print(f"  ✓ Can list S3 stage ({len(rows)} files found)")
         cursor.close()
         conn.close()
         return True
-        
+
     except Exception as e:
         print(f"  ✗ Error accessing S3: {e}")
         return False
@@ -873,16 +873,16 @@ def verify_s3_access() -> bool:
 def setup_aws():
     """Run AWS setup steps."""
     print_header("AWS Infrastructure Setup")
-    
+
     if not HAS_BOTO3:
         print("Warning: boto3 not installed. Using AWS CLI instead.")
-    
+
     if not check_aws_cli():
         print("Error: AWS CLI not found. Please install it first.")
         print("  brew install awscli  # macOS")
         print("  pip install awscli   # pip")
         return False
-    
+
     # Step 1: Deploy CloudFormation
     print_step(1, 3, "Deploying CloudFormation stack")
     try:
@@ -892,39 +892,39 @@ def setup_aws():
     except Exception as e:
         print(f"  Error: {e}")
         return False
-    
+
     # Step 2: Update Lambda (optional, only if Lambdas exist)
     print_step(2, 3, "Updating Lambda environment (if exists)")
     try:
         update_lambda_environment()
     except Exception as e:
         print(f"  Skipped (Lambdas may not exist): {e}")
-    
+
     print_step(3, 3, "AWS setup complete")
     print("  ✓ IAM role created/updated")
     print("  ✓ Lambda environment configured")
     print("\n  Next: Run Snowflake setup to complete the integration")
-    
+
     return True
 
 
 def setup_snowflake():
     """Run Snowflake setup steps."""
     print_header("Snowflake Setup")
-    
+
     if not HAS_SNOWFLAKE:
         print("Error: snowflake-connector-python not installed.")
         print("  Run: uv add snowflake-connector-python")
         return False
-    
+
     # Step 1: Prepare SQL scripts
     print_step(1, 4, "Preparing SQL scripts")
     scripts = prepare_sql_scripts()
-    
+
     # Step 2: Run SQL scripts
     print_step(2, 4, "Running Snowflake SQL scripts")
     results = run_snowflake_scripts(scripts)
-    
+
     # Step 3: Update IAM trust policy
     print_step(3, 4, "Updating IAM trust policy")
     if results.get("storage_aws_iam_user_arn") and results.get("storage_aws_external_id"):
@@ -936,7 +936,7 @@ def setup_snowflake():
         print("  Warning: Could not get Snowflake IAM details")
         print("  Run this in Snowflake to get the values:")
         print("    DESC STORAGE INTEGRATION gfn_s3_integration;")
-    
+
     # Step 4: Configure S3 notifications
     print_step(4, 4, "Configuring S3 notifications")
     if results.get("snowpipe_sqs_arn"):
@@ -945,7 +945,7 @@ def setup_snowflake():
         print("  Warning: Could not get Snowpipe SQS ARN")
         print("  Run this in Snowflake to get the SQS ARN:")
         print("    SHOW PIPES LIKE 'GFN_FOOTPRINT_DATA_PIPE';")
-    
+
     print("\n  ✓ Snowflake setup complete")
     return True
 
@@ -953,29 +953,29 @@ def setup_snowflake():
 def verify_setup():
     """Verify the complete setup."""
     print_header("Verification")
-    
+
     if not HAS_SNOWFLAKE:
         print("Error: snowflake-connector-python not installed.")
         return False
-    
+
     results = {
         "storage_integration": verify_storage_integration(),
         "s3_access": verify_s3_access(),
         "snowpipe": verify_snowpipe(),
     }
-    
+
     print("\n" + "-" * 50)
     print("Summary:")
     for check, passed in results.items():
         status = "✓" if passed else "✗"
         print(f"  {status} {check.replace('_', ' ').title()}")
-    
+
     all_passed = all(results.values())
     if all_passed:
         print("\n✓ All checks passed! Pipeline is ready.")
     else:
         print("\n⚠ Some checks failed. Review the output above.")
-    
+
     return all_passed
 
 
@@ -983,7 +983,7 @@ def interactive_setup():
     """Run interactive setup with prompts."""
     global AWS_ACCOUNT_ID, SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD
     global SNOWFLAKE_WAREHOUSE
-    
+
     print_header("GFN Pipeline - Snowflake Production Setup")
     print("""
 This script will:
@@ -993,39 +993,39 @@ This script will:
   4. Update IAM trust policy
   5. Verify the complete setup
     """)
-    
+
     # Gather required values
     print("Configuration:")
     print("-" * 50)
-    
+
     AWS_ACCOUNT_ID = prompt_for_value("AWS_ACCOUNT_ID", AWS_ACCOUNT_ID)
     SNOWFLAKE_ACCOUNT = prompt_for_value("SNOWFLAKE_ACCOUNT", SNOWFLAKE_ACCOUNT)
     SNOWFLAKE_USER = prompt_for_value("SNOWFLAKE_USER", SNOWFLAKE_USER)
     SNOWFLAKE_PASSWORD = prompt_for_value("SNOWFLAKE_PASSWORD", SNOWFLAKE_PASSWORD, secret=True)
     SNOWFLAKE_WAREHOUSE = prompt_for_value("SNOWFLAKE_WAREHOUSE", SNOWFLAKE_WAREHOUSE)
-    
+
     print("\n")
     proceed = input("Proceed with setup? [Y/n]: ").strip().lower()
     if proceed == "n":
         print("Aborted.")
         return
-    
+
     # Run setup steps
     if not setup_aws():
         print("\nAWS setup failed. Fix issues and retry.")
         return
-    
+
     if not setup_snowflake():
         print("\nSnowflake setup failed. Fix issues and retry.")
         return
-    
+
     # Wait a moment for things to propagate
     print("\nWaiting 10 seconds for configuration to propagate...")
     time.sleep(10)
-    
+
     # Verify
     verify_setup()
-    
+
     print_header("Setup Complete")
     print("""
 Next steps:
@@ -1049,7 +1049,7 @@ Next steps:
 
 def main():
     global USE_LOCALSTACK
-    
+
     parser = argparse.ArgumentParser(
         description="Setup Snowflake production infrastructure for GFN pipeline"
     )
@@ -1069,9 +1069,9 @@ def main():
         action="store_true",
         help="Use LocalStack instead of real AWS (for local development)"
     )
-    
+
     args = parser.parse_args()
-    
+
     # Set LocalStack mode if requested
     if args.use_localstack:
         USE_LOCALSTACK = True
@@ -1081,7 +1081,7 @@ def main():
             print("  Start it with: make localstack-up")
             sys.exit(1)
         print("  LocalStack is running")
-    
+
     if args.step == "aws":
         setup_aws()
     elif args.step == "snowflake":
@@ -1099,11 +1099,11 @@ def main():
             missing.append("SNOWFLAKE_USER")
         if not SNOWFLAKE_PASSWORD:
             missing.append("SNOWFLAKE_PASSWORD")
-        
+
         if missing:
             print(f"Error: Missing required environment variables: {', '.join(missing)}")
             sys.exit(1)
-        
+
         setup_aws()
         setup_snowflake()
         time.sleep(10)
