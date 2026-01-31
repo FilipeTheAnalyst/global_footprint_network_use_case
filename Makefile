@@ -114,6 +114,10 @@ run:
 	@echo "Running pipeline (DuckDB destination)..."
 	uv run python -m gfn_pipeline.main --destination duckdb
 
+run-local:
+	@echo "Running pipeline (DuckDB + local disk, no LocalStack)..."
+	uv run python -m gfn_pipeline.main --destination duckdb --no-localstack
+
 run-snowflake:
 	@echo "Running pipeline (Snowflake destination)..."
 	uv run python -m gfn_pipeline.main --destination snowflake

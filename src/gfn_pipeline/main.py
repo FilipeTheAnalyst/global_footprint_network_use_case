@@ -63,43 +63,52 @@ class PipelineRunner:
         start_year: int = 2010,
         end_year: int = 2024,
         use_localstack: bool = True,
+        include_all_types: bool = True,
     ):
         self.destination = destination
         self.start_year = start_year
         self.end_year = end_year
         self.use_localstack = use_localstack
+        self.include_all_types = include_all_types
         self.metrics = {
             "start_time": None,
             "end_time": None,
+            "countries_extracted": 0,
             "records_extracted": 0,
             "records_transformed": 0,
             "records_loaded": 0,
+            "record_types": [],
             "errors": [],
         }
     
     def run(self) -> dict:
         """Execute the full pipeline."""
         self.metrics["start_time"] = datetime.now(timezone.utc).isoformat()
-        logger.info(f"Starting pipeline: destination={self.destination}, years={self.start_year}-{self.end_year}")
+        logger.info(f"Starting pipeline: destination={self.destination}, years={self.start_year}-{self.end_year}, all_types={self.include_all_types}")
         
         try:
             # Step 1: Extract
-            raw_data = self._extract()
-            self.metrics["records_extracted"] = len(raw_data)
-            logger.info(f"Extracted {len(raw_data)} records")
+            extracted_data = self._extract()
+            self.metrics["countries_extracted"] = len(extracted_data.get("countries", []))
+            self.metrics["records_extracted"] = len(extracted_data.get("footprint_data", []))
+            self.metrics["record_types"] = list(set(r["record_type"] for r in extracted_data.get("footprint_data", [])))
+            logger.info(f"Extracted {self.metrics['countries_extracted']} countries, {self.metrics['records_extracted']} records")
             
-            if not raw_data:
+            if not extracted_data.get("footprint_data"):
                 logger.warning("No data extracted, skipping transform and load")
                 return self._finalize_metrics("no_data")
             
             # Step 2: Store raw data (S3 or local)
-            raw_path = self._store_raw(raw_data)
+            raw_path = self._store_raw(extracted_data)
             logger.info(f"Stored raw data: {raw_path}")
             
             # Step 3: Transform
-            transformed_data = self._transform(raw_data)
-            self.metrics["records_transformed"] = len(transformed_data)
-            logger.info(f"Transformed {len(transformed_data)} records")
+            transformed_data = self._transform(extracted_data)
+            self.metrics["records_transformed"] = (
+                len(transformed_data.get("countries", [])) +
+                len(transformed_data.get("footprint_data", []))
+            )
+            logger.info(f"Transformed {self.metrics['records_transformed']} total records")
             
             # Step 4: Store processed data
             processed_path = self._store_processed(transformed_data)
@@ -117,21 +126,28 @@ class PipelineRunner:
             self.metrics["errors"].append(str(e))
             return self._finalize_metrics("failed")
     
-    def _extract(self) -> list[dict]:
+    def _extract(self) -> dict[str, list[dict]]:
         """Extract data from GFN API."""
-        from gfn_pipeline.pipeline_async import ExtractionConfig, extract_all_parallel
+        from gfn_pipeline.pipeline_async import ExtractionConfig, extract_all_data, ALL_RECORD_TYPES
         
         api_key = os.getenv("GFN_API_KEY")
         if not api_key:
             raise ValueError("GFN_API_KEY environment variable required")
         
         config = ExtractionConfig(api_key=api_key)
-        return asyncio.run(extract_all_parallel(config, self.start_year, self.end_year))
+        
+        # Determine record types to extract
+        if self.include_all_types:
+            record_types = list(ALL_RECORD_TYPES.keys())
+        else:
+            record_types = ["EFCtot"]
+        
+        return asyncio.run(extract_all_data(config, self.start_year, self.end_year, record_types))
     
-    def _store_raw(self, data: list[dict]) -> str:
+    def _store_raw(self, data: dict[str, list[dict]]) -> str:
         """Store raw data to S3 or local filesystem."""
         timestamp = datetime.now(timezone.utc)
-        filename = f"carbon_footprint_{timestamp.strftime('%Y%m%d_%H%M%S')}.json"
+        filename = f"gfn_data_{timestamp.strftime('%Y%m%d_%H%M%S')}.json"
         
         if self.use_localstack or os.getenv("AWS_ENDPOINT_URL"):
             # Store to S3 (LocalStack or real AWS)
@@ -151,7 +167,7 @@ class PipelineRunner:
             
             s3 = boto3.client("s3", **s3_config)
             bucket = os.getenv("S3_BUCKET", "gfn-data-lake")
-            key = f"raw/carbon_footprint/{timestamp.strftime('%Y/%m/%d')}/{filename}"
+            key = f"raw/gfn/{timestamp.strftime('%Y/%m/%d')}/{filename}"
             
             s3.put_object(
                 Bucket=bucket,
@@ -170,41 +186,52 @@ class PipelineRunner:
                 json.dump(data, f)
             return str(filepath)
     
-    def _transform(self, data: list[dict]) -> list[dict]:
+    def _transform(self, data: dict[str, list[dict]]) -> dict[str, list[dict]]:
         """Transform and validate data."""
-        transformed = []
-        seen = set()
+        transformed_at = datetime.now(timezone.utc).isoformat()
         
-        for record in data:
+        # Transform countries (minimal transformation)
+        countries = []
+        seen_countries = set()
+        for c in data.get("countries", []):
+            if not c.get("country_code"):
+                continue
+            if c["country_code"] in seen_countries:
+                continue
+            seen_countries.add(c["country_code"])
+            countries.append({
+                **c,
+                "transformed_at": transformed_at,
+            })
+        
+        # Transform footprint data
+        footprint_data = []
+        seen_records = set()
+        for r in data.get("footprint_data", []):
             # Validate required fields
-            if not record.get("country_code") or not record.get("year"):
+            if not r.get("country_code") or not r.get("year") or not r.get("record_type"):
                 continue
             
             # Deduplicate
-            key = (record["country_code"], record["year"])
-            if key in seen:
+            key = (r["country_code"], r["year"], r["record_type"])
+            if key in seen_records:
                 continue
-            seen.add(key)
+            seen_records.add(key)
             
-            # Enrich
-            carbon = record.get("carbon_footprint_gha")
-            total = record.get("total_footprint_gha")
-            
-            transformed.append({
-                **record,
-                "carbon_pct_of_total": (
-                    round(carbon / total * 100, 2)
-                    if carbon and total else None
-                ),
-                "transformed_at": datetime.now(timezone.utc).isoformat(),
+            footprint_data.append({
+                **r,
+                "transformed_at": transformed_at,
             })
         
-        return transformed
+        return {
+            "countries": countries,
+            "footprint_data": footprint_data,
+        }
     
-    def _store_processed(self, data: list[dict]) -> str:
+    def _store_processed(self, data: dict[str, list[dict]]) -> str:
         """Store processed data."""
         timestamp = datetime.now(timezone.utc)
-        filename = f"carbon_footprint_{timestamp.strftime('%Y%m%d_%H%M%S')}_processed.json"
+        filename = f"gfn_data_{timestamp.strftime('%Y%m%d_%H%M%S')}_processed.json"
         
         if self.use_localstack or os.getenv("AWS_ENDPOINT_URL"):
             import boto3
@@ -223,7 +250,7 @@ class PipelineRunner:
             
             s3 = boto3.client("s3", **s3_config)
             bucket = os.getenv("S3_BUCKET", "gfn-data-lake")
-            key = f"processed/carbon_footprint/{timestamp.strftime('%Y/%m/%d')}/{filename}"
+            key = f"processed/gfn/{timestamp.strftime('%Y/%m/%d')}/{filename}"
             
             s3.put_object(
                 Bucket=bucket,
@@ -241,7 +268,7 @@ class PipelineRunner:
                 json.dump(data, f)
             return str(filepath)
     
-    def _load(self, data: list[dict]) -> dict:
+    def _load(self, data: dict[str, list[dict]]) -> dict:
         """Load data to destination(s)."""
         results = {"destinations": {}, "total_loaded": 0}
         
@@ -269,7 +296,7 @@ class PipelineRunner:
         
         return results
     
-    def _load_to_duckdb(self, data: list[dict]) -> int:
+    def _load_to_duckdb(self, data: dict[str, list[dict]]) -> int:
         """Load data to DuckDB."""
         import duckdb
         
@@ -277,60 +304,97 @@ class PipelineRunner:
         logger.info(f"Loading to DuckDB: {db_path}")
         
         conn = duckdb.connect(db_path)
+        total_loaded = 0
         
-        # Create table if not exists
+        # Create and load countries table
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS carbon_footprint (
-                country_code INTEGER,
-                country_name VARCHAR,
+            CREATE TABLE IF NOT EXISTS countries (
+                country_code INTEGER PRIMARY KEY,
+                country_name VARCHAR NOT NULL,
                 iso_alpha2 VARCHAR,
-                year INTEGER,
-                carbon_footprint_gha DOUBLE,
-                total_footprint_gha DOUBLE,
-                carbon_pct_of_total DOUBLE,
+                version VARCHAR,
+                extracted_at TIMESTAMP,
+                transformed_at TIMESTAMP,
+                loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        countries = data.get("countries", [])
+        if countries:
+            conn.execute("DELETE FROM countries")
+            conn.executemany("""
+                INSERT INTO countries (country_code, country_name, iso_alpha2, version, extracted_at, transformed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, [
+                (c["country_code"], c["country_name"], c.get("iso_alpha2"), c.get("version"),
+                 c.get("extracted_at"), c.get("transformed_at"))
+                for c in countries
+            ])
+            total_loaded += len(countries)
+        
+        # Create and load footprint_data table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS footprint_data (
+                country_code INTEGER NOT NULL,
+                country_name VARCHAR NOT NULL,
+                iso_alpha2 VARCHAR,
+                year INTEGER NOT NULL,
+                record_type VARCHAR NOT NULL,
+                record_type_description VARCHAR,
+                value DOUBLE,
+                carbon DOUBLE,
                 score VARCHAR,
                 extracted_at TIMESTAMP,
                 transformed_at TIMESTAMP,
                 loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (country_code, year)
+                PRIMARY KEY (country_code, year, record_type)
             )
         """)
         
-        # Insert/update data
-        if data:
-            conn.execute("""
-                INSERT OR REPLACE INTO carbon_footprint 
-                SELECT 
-                    UNNEST($1) as country_code,
-                    UNNEST($2) as country_name,
-                    UNNEST($3) as iso_alpha2,
-                    UNNEST($4) as year,
-                    UNNEST($5) as carbon_footprint_gha,
-                    UNNEST($6) as total_footprint_gha,
-                    UNNEST($7) as carbon_pct_of_total,
-                    UNNEST($8) as score,
-                    UNNEST($9)::TIMESTAMP as extracted_at,
-                    UNNEST($10)::TIMESTAMP as transformed_at,
-                    CURRENT_TIMESTAMP as loaded_at
+        footprint_data = data.get("footprint_data", [])
+        if footprint_data:
+            # Use INSERT OR REPLACE for upsert
+            conn.executemany("""
+                INSERT OR REPLACE INTO footprint_data 
+                (country_code, country_name, iso_alpha2, year, record_type, record_type_description, value, carbon, score, extracted_at, transformed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, [
-                [r.get("country_code") for r in data],
-                [r.get("country_name") for r in data],
-                [r.get("iso_alpha2") for r in data],
-                [r.get("year") for r in data],
-                [r.get("carbon_footprint_gha") for r in data],
-                [r.get("total_footprint_gha") for r in data],
-                [r.get("carbon_pct_of_total") for r in data],
-                [r.get("score") for r in data],
-                [r.get("extracted_at") for r in data],
-                [r.get("transformed_at") for r in data],
+                (r["country_code"], r["country_name"], r.get("iso_alpha2"), r["year"],
+                 r["record_type"], r.get("record_type_description"), r.get("value"),
+                 r.get("carbon"), r.get("score"), r.get("extracted_at"), r.get("transformed_at"))
+                for r in footprint_data
             ])
+            total_loaded += len(footprint_data)
         
-        count = conn.execute("SELECT COUNT(*) FROM carbon_footprint").fetchone()[0]
+        # Create useful views
+        conn.execute("""
+            CREATE OR REPLACE VIEW ecological_footprint AS
+            SELECT * FROM footprint_data
+            WHERE record_type LIKE 'EFC%' AND record_type NOT LIKE '%PerCap'
+        """)
+        
+        conn.execute("""
+            CREATE OR REPLACE VIEW biocapacity AS
+            SELECT * FROM footprint_data
+            WHERE record_type LIKE 'BioCap%' AND record_type NOT LIKE '%PerCap'
+        """)
+        
+        conn.execute("""
+            CREATE OR REPLACE VIEW per_capita_metrics AS
+            SELECT * FROM footprint_data
+            WHERE record_type LIKE '%PerCap'
+        """)
+        
+        conn.execute("""
+            CREATE OR REPLACE VIEW ecological_deficit AS
+            SELECT * FROM footprint_data
+            WHERE record_type LIKE 'EFCdef%'
+        """)
+        
         conn.close()
-        
-        return len(data)
+        return total_loaded
     
-    def _load_to_snowflake(self, data: list[dict]) -> int:
+    def _load_to_snowflake(self, data: dict[str, list[dict]]) -> int:
         """Load data to Snowflake."""
         import snowflake.connector
         
@@ -350,65 +414,87 @@ class PipelineRunner:
         )
         
         cursor = conn.cursor()
+        total_loaded = 0
         
-        # Create table if not exists
+        # Create and load countries table
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS CARBON_FOOTPRINT_RAW (
-                country_code INTEGER,
-                country_name VARCHAR,
+            CREATE TABLE IF NOT EXISTS COUNTRIES (
+                country_code INTEGER PRIMARY KEY,
+                country_name VARCHAR NOT NULL,
                 iso_alpha2 VARCHAR,
-                year INTEGER,
-                carbon_footprint_gha DOUBLE,
-                total_footprint_gha DOUBLE,
-                carbon_pct_of_total DOUBLE,
-                score VARCHAR,
+                version VARCHAR,
                 extracted_at TIMESTAMP_TZ,
                 transformed_at TIMESTAMP_TZ,
                 loaded_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP()
             )
         """)
         
-        # Use MERGE for upsert
-        loaded = 0
-        for record in data:
+        countries = data.get("countries", [])
+        if countries:
+            cursor.execute("DELETE FROM COUNTRIES")
+            for c in countries:
+                cursor.execute("""
+                    INSERT INTO COUNTRIES (country_code, country_name, iso_alpha2, version, extracted_at, transformed_at)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (c["country_code"], c["country_name"], c.get("iso_alpha2"), c.get("version"),
+                      c.get("extracted_at"), c.get("transformed_at")))
+            total_loaded += len(countries)
+        
+        # Create and load footprint_data table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS FOOTPRINT_DATA (
+                country_code INTEGER NOT NULL,
+                country_name VARCHAR NOT NULL,
+                iso_alpha2 VARCHAR,
+                year INTEGER NOT NULL,
+                record_type VARCHAR NOT NULL,
+                record_type_description VARCHAR,
+                value DOUBLE,
+                carbon DOUBLE,
+                score VARCHAR,
+                extracted_at TIMESTAMP_TZ,
+                transformed_at TIMESTAMP_TZ,
+                loaded_at TIMESTAMP_TZ DEFAULT CURRENT_TIMESTAMP(),
+                PRIMARY KEY (country_code, year, record_type)
+            )
+        """)
+        
+        footprint_data = data.get("footprint_data", [])
+        for r in footprint_data:
             cursor.execute("""
-                MERGE INTO CARBON_FOOTPRINT_RAW t
-                USING (SELECT %s as country_code, %s as year) s
-                ON t.country_code = s.country_code AND t.year = s.year
+                MERGE INTO FOOTPRINT_DATA t
+                USING (SELECT %s as country_code, %s as year, %s as record_type) s
+                ON t.country_code = s.country_code AND t.year = s.year AND t.record_type = s.record_type
                 WHEN MATCHED THEN UPDATE SET
                     country_name = %s,
                     iso_alpha2 = %s,
-                    carbon_footprint_gha = %s,
-                    total_footprint_gha = %s,
-                    carbon_pct_of_total = %s,
+                    record_type_description = %s,
+                    value = %s,
+                    carbon = %s,
                     score = %s,
                     extracted_at = %s,
                     transformed_at = %s,
                     loaded_at = CURRENT_TIMESTAMP()
                 WHEN NOT MATCHED THEN INSERT (
-                    country_code, country_name, iso_alpha2, year,
-                    carbon_footprint_gha, total_footprint_gha, carbon_pct_of_total,
-                    score, extracted_at, transformed_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    country_code, country_name, iso_alpha2, year, record_type, 
+                    record_type_description, value, carbon, score, extracted_at, transformed_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
-                record.get("country_code"), record.get("year"),
-                record.get("country_name"), record.get("iso_alpha2"),
-                record.get("carbon_footprint_gha"), record.get("total_footprint_gha"),
-                record.get("carbon_pct_of_total"), record.get("score"),
-                record.get("extracted_at"), record.get("transformed_at"),
-                record.get("country_code"), record.get("country_name"),
-                record.get("iso_alpha2"), record.get("year"),
-                record.get("carbon_footprint_gha"), record.get("total_footprint_gha"),
-                record.get("carbon_pct_of_total"), record.get("score"),
-                record.get("extracted_at"), record.get("transformed_at"),
+                r["country_code"], r["year"], r["record_type"],
+                r["country_name"], r.get("iso_alpha2"), r.get("record_type_description"),
+                r.get("value"), r.get("carbon"), r.get("score"),
+                r.get("extracted_at"), r.get("transformed_at"),
+                r["country_code"], r["country_name"], r.get("iso_alpha2"), r["year"],
+                r["record_type"], r.get("record_type_description"), r.get("value"),
+                r.get("carbon"), r.get("score"), r.get("extracted_at"), r.get("transformed_at"),
             ))
-            loaded += 1
+            total_loaded += 1
         
         conn.commit()
         cursor.close()
         conn.close()
         
-        return loaded
+        return total_loaded
     
     def _finalize_metrics(self, status: str) -> dict:
         """Finalize and return metrics."""
@@ -430,11 +516,11 @@ class PipelineRunner:
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="GFN Carbon Footprint Pipeline",
+        description="GFN Data Pipeline - Comprehensive Extraction",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run with DuckDB (local testing)
+  # Run with DuckDB - all data types (default)
   python -m gfn_pipeline.main --destination duckdb
   
   # Run with Snowflake (production)
@@ -445,6 +531,12 @@ Examples:
   
   # Specify year range
   python -m gfn_pipeline.main --start-year 2020 --end-year 2024
+  
+  # Legacy mode (only EFCtot)
+  python -m gfn_pipeline.main --legacy
+  
+  # Local disk storage (no LocalStack)
+  python -m gfn_pipeline.main --no-localstack
         """,
     )
     parser.add_argument(
@@ -458,7 +550,12 @@ Examples:
     parser.add_argument(
         "--no-localstack",
         action="store_true",
-        help="Don't use LocalStack for S3 storage",
+        help="Don't use LocalStack for S3 storage (use local disk)",
+    )
+    parser.add_argument(
+        "--legacy",
+        action="store_true",
+        help="Only extract EFCtot (legacy mode)",
     )
     args = parser.parse_args()
     
@@ -471,14 +568,15 @@ Examples:
         start_year=args.start_year,
         end_year=args.end_year,
         use_localstack=not args.no_localstack,
+        include_all_types=not args.legacy,
     )
     
     result = runner.run()
     
     # Print summary
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("PIPELINE SUMMARY")
-    print("=" * 60)
+    print("=" * 70)
     print(json.dumps(result, indent=2))
     
     # Exit with appropriate code

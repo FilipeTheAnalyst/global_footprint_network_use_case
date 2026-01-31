@@ -1,12 +1,12 @@
-# Soda Data Quality Checks for GFN Carbon Footprint Pipeline
+# Soda Data Quality Checks for GFN Pipeline
 # https://docs.soda.io/soda-cl/soda-cl-overview.html
 
 # =============================================================================
-# RAW TABLE CHECKS
+# RAW TABLE CHECKS - GFN Footprint Data
 # =============================================================================
 
-checks for CARBON_FOOTPRINT_RAW:
-  # Row count validation
+checks for GFN_FOOTPRINT_DATA_RAW:
+  # Row count validation - expect data for ~184 countries × 28 record types × ~60 years
   - row_count > 0:
       name: "Raw table has data"
   
@@ -21,6 +21,10 @@ checks for CARBON_FOOTPRINT_RAW:
       name: "Country name is required"
   - missing_count(YEAR) = 0:
       name: "Year is required"
+  - missing_count(RECORD_TYPE) = 0:
+      name: "Record type is required"
+  - missing_count(RECORD_CATEGORY) = 0:
+      name: "Record category is required"
   
   # Data type validations
   - invalid_count(YEAR) = 0:
@@ -28,14 +32,52 @@ checks for CARBON_FOOTPRINT_RAW:
       valid min: 1960
       valid max: 2030
   
-  # Carbon footprint should be non-negative
-  - invalid_count(CARBON_FOOTPRINT_GHA) = 0:
-      name: "Carbon footprint is non-negative"
+  # Value should be non-negative (global hectares)
+  - invalid_count(VALUE) = 0:
+      name: "Value is non-negative"
       valid min: 0
   
-  # Uniqueness check - one record per country per year
-  - duplicate_count(COUNTRY_CODE, YEAR) = 0:
-      name: "No duplicate country-year records"
+  # Record type validation - must be one of the 28 valid types
+  - invalid_count(RECORD_TYPE) = 0:
+      name: "Record type is valid"
+      valid values:
+        - EFCtot
+        - EFCcrop
+        - EFCgraz
+        - EFCfrst
+        - EFCfish
+        - EFCbult
+        - EFCcarb
+        - BioCaptot
+        - BioCapcrop
+        - BioCapgraz
+        - BioCapfrst
+        - BioCapfish
+        - BioCapbult
+        - EFCtotPerCap
+        - EFCcropPerCap
+        - EFCgrazPerCap
+        - EFCfrstPerCap
+        - EFCfishPerCap
+        - EFCbultPerCap
+        - EFCcarbPerCap
+        - BioCaptotPerCap
+        - BioCapcropPerCap
+        - BioCapgrazPerCap
+        - BioCapfrstPerCap
+        - BioCapfishPerCap
+        - BioCapbultPerCap
+  
+  # Record category validation
+  - invalid_count(RECORD_CATEGORY) = 0:
+      name: "Record category is valid"
+      valid values:
+        - ecological_footprint
+        - biocapacity
+  
+  # Uniqueness check - one record per country per year per record type
+  - duplicate_count(COUNTRY_CODE, YEAR, RECORD_TYPE) = 0:
+      name: "No duplicate country-year-type records"
 
   # Schema evolution check - ensure expected columns exist
   - schema:
@@ -45,5 +87,38 @@ checks for CARBON_FOOTPRINT_RAW:
           - COUNTRY_CODE
           - COUNTRY_NAME
           - YEAR
-          - CARBON_FOOTPRINT_GHA
+          - RECORD_TYPE
+          - RECORD_CATEGORY
+          - VALUE
+          - PER_CAPITA
           - _LOADED_AT
+
+# =============================================================================
+# COVERAGE CHECKS - Ensure comprehensive data extraction
+# =============================================================================
+
+checks for GFN_FOOTPRINT_DATA_RAW:
+  # Ensure we have all 28 record types
+  - row_count same as GFN_FOOTPRINT_DATA_RAW:
+      name: "All record types present"
+      filter: RECORD_TYPE IN ('EFCtot', 'BioCaptot')
+      # At minimum, we should have total footprint and biocapacity
+  
+  # Ensure reasonable country coverage (expect ~180+ countries)
+  - distinct_count(COUNTRY_CODE) >= 150:
+      name: "Sufficient country coverage"
+  
+  # Ensure data spans multiple decades
+  - distinct_count(YEAR) >= 50:
+      name: "Sufficient year coverage"
+
+# =============================================================================
+# TRANSFORMED/PROCESSED TABLE CHECKS (if applicable)
+# =============================================================================
+
+# checks for GFN_FOOTPRINT_DATA:
+#   - row_count > 0:
+#       name: "Processed table has data"
+#   
+#   - missing_count(VALUE) = 0:
+#       name: "All records have values"

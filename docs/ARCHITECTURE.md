@@ -210,9 +210,6 @@
     │   ├── setup_snowflake_production.py  # Snowflake production setup
     │   └── load_to_snowflake.py       # Snowflake loading utilities
     │
-    ├── api/                           # FastAPI service
-    │   └── main.py                    # REST API for pipeline operations
-    │
     ├── tests/                         # Test suite
     │   └── test_pipeline.py           # Pipeline tests
     │
@@ -222,9 +219,8 @@
     ├── docs/                          # Documentation
     │   └── ARCHITECTURE.md            # This file
     │
-    ├── docker-compose.yml             # LocalStack + API containers
-    ├── Dockerfile                     # Lambda container image
-    ├── Dockerfile.api                 # API container image
+    ├── docker-compose.yml             # LocalStack + pipeline containers
+    ├── Dockerfile                     # Pipeline container image
     ├── Makefile                       # Build/run commands
     └── pyproject.toml                 # Dependencies (uv)
 

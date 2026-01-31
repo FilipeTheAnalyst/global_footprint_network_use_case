@@ -228,7 +228,7 @@ def setup_localstack_resources():
         print(f"  ✓ S3 bucket: {S3_BUCKET} ({e})")
     
     # Create folder structure
-    for prefix in ["raw/carbon_footprint/", "processed/carbon_footprint/", "failed/"]:
+    for prefix in ["raw/gfn_footprint_data/", "processed/gfn_footprint_data/", "failed/"]:
         s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}.keep", Body=b"placeholder")
     print(f"  ✓ Created S3 folder structure")
     
@@ -327,7 +327,7 @@ def setup_localstack_resources():
                         "Filter": {
                             "Key": {
                                 "FilterRules": [
-                                    {"Name": "prefix", "Value": "processed/"},
+                                    {"Name": "prefix", "Value": "processed/gfn_footprint_data/"},
                                     {"Name": "suffix", "Value": ".json"},
                                 ]
                             }
@@ -483,7 +483,7 @@ def configure_s3_notifications(sqs_arn: str):
                 "Filter": {
                     "Key": {
                         "FilterRules": [
-                            {"Name": "prefix", "Value": "processed/carbon_footprint/"},
+                            {"Name": "prefix", "Value": "processed/gfn_footprint_data/"},
                             {"Name": "suffix", "Value": ".json"},
                         ]
                     }
@@ -646,7 +646,7 @@ def run_snowflake_scripts(scripts: list[Path]) -> dict:
                         if rows:
                             # notification_channel is typically column index 9
                             for row in rows:
-                                if "CARBON_FOOTPRINT_PIPE" in str(row):
+                                if "GFN_FOOTPRINT_DATA_PIPE" in str(row):
                                     # Find the SQS ARN in the row
                                     for val in row:
                                         if val and "sqs" in str(val).lower():
@@ -820,7 +820,7 @@ def verify_snowpipe() -> bool:
         conn = get_snowflake_connection()
         cursor = conn.cursor()
         
-        cursor.execute("SELECT SYSTEM$PIPE_STATUS('GFN.RAW.CARBON_FOOTPRINT_PIPE')")
+        cursor.execute("SELECT SYSTEM$PIPE_STATUS('GFN.RAW.GFN_FOOTPRINT_DATA_PIPE')")
         result = cursor.fetchone()
         
         if result:
@@ -944,7 +944,7 @@ def setup_snowflake():
     else:
         print("  Warning: Could not get Snowpipe SQS ARN")
         print("  Run this in Snowflake to get the SQS ARN:")
-        print("    SHOW PIPES LIKE 'CARBON_FOOTPRINT_PIPE';")
+        print("    SHOW PIPES LIKE 'GFN_FOOTPRINT_DATA_PIPE';")
     
     print("\n  ✓ Snowflake setup complete")
     return True
@@ -1030,13 +1030,13 @@ This script will:
     print("""
 Next steps:
   1. Upload a test file to S3:
-     aws s3 cp test.json s3://gfn-data-lake/processed/carbon_footprint/
+     aws s3 cp test.json s3://gfn-data-lake/processed/gfn_footprint_data/
 
   2. Check Snowpipe status:
-     SELECT SYSTEM$PIPE_STATUS('GFN.RAW.CARBON_FOOTPRINT_PIPE');
+     SELECT SYSTEM$PIPE_STATUS('GFN.RAW.GFN_FOOTPRINT_DATA_PIPE');
 
   3. Monitor data ingestion:
-     SELECT * FROM GFN.RAW.CARBON_FOOTPRINT_RAW LIMIT 10;
+     SELECT * FROM GFN.RAW.GFN_FOOTPRINT_DATA_RAW LIMIT 10;
 
   4. Run the Lambda pipeline:
      aws lambda invoke --function-name gfn-extract --payload '{"start_year": 2023}' out.json
