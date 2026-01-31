@@ -1,0 +1,49 @@
+# Soda Data Quality Checks for GFN Carbon Footprint Pipeline
+# https://docs.soda.io/soda-cl/soda-cl-overview.html
+
+# =============================================================================
+# RAW TABLE CHECKS
+# =============================================================================
+
+checks for CARBON_FOOTPRINT_RAW:
+  # Row count validation
+  - row_count > 0:
+      name: "Raw table has data"
+  
+  # Freshness check - data should be loaded within last 24 hours
+  - freshness(_LOADED_AT) < 1d:
+      name: "Data loaded within 24 hours"
+  
+  # Required columns are not null
+  - missing_count(COUNTRY_CODE) = 0:
+      name: "Country code is required"
+  - missing_count(COUNTRY_NAME) = 0:
+      name: "Country name is required"
+  - missing_count(YEAR) = 0:
+      name: "Year is required"
+  
+  # Data type validations
+  - invalid_count(YEAR) = 0:
+      name: "Year is valid"
+      valid min: 1960
+      valid max: 2030
+  
+  # Carbon footprint should be non-negative
+  - invalid_count(CARBON_FOOTPRINT_GHA) = 0:
+      name: "Carbon footprint is non-negative"
+      valid min: 0
+  
+  # Uniqueness check - one record per country per year
+  - duplicate_count(COUNTRY_CODE, YEAR) = 0:
+      name: "No duplicate country-year records"
+
+  # Schema evolution check - ensure expected columns exist
+  - schema:
+      name: "Schema has required columns"
+      fail:
+        when required column missing:
+          - COUNTRY_CODE
+          - COUNTRY_NAME
+          - YEAR
+          - CARBON_FOOTPRINT_GHA
+          - _LOADED_AT

@@ -50,3 +50,12 @@ data/
 # Logs
 *.log
 logs/
+
+# LocalStack persistence
+localstack-data/
+
+# Test cache
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/

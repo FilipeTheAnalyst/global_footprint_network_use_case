@@ -1,0 +1,110 @@
+# =============================================================================
+# GFN Pipeline - Docker Compose
+# =============================================================================
+# 
+# Services:
+#   - localstack: AWS services simulation (S3, SQS, SNS, Lambda, EventBridge)
+#   - pipeline: Main pipeline container (DuckDB/Snowflake)
+#   - duckdb-ui: Optional DuckDB web interface
+#
+# Usage:
+#   make docker-up              # Start LocalStack
+#   make docker-pipeline        # Run pipeline in container
+#   make docker-down            # Stop all services
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # LocalStack - AWS Services Simulation
+  # ===========================================================================
+  localstack:
+    image: localstack/localstack:3.0
+    container_name: gfn-localstack
+    ports:
+      - "4566:4566"           # LocalStack Gateway
+      - "4510-4559:4510-4559" # External services port range
+    environment:
+      - DEBUG=${LOCALSTACK_DEBUG:-0}
+      - SERVICES=s3,sqs,sns,events,stepfunctions,logs,cloudwatch,lambda,iam,apigateway
+      - AWS_DEFAULT_REGION=us-east-1
+      - LAMBDA_EXECUTOR=docker
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - PERSISTENCE=1
+    volumes:
+      - "./localstack-data:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - gfn-network
+
+  # ===========================================================================
+  # GFN Pipeline Container
+  # ===========================================================================
+  # Main pipeline that can run with DuckDB (local) or Snowflake (production)
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gfn-pipeline
+    environment:
+      # API Configuration
+      - GFN_API_KEY=${GFN_API_KEY}
+      
+      # Destination (duckdb, snowflake, or both)
+      - PIPELINE_DESTINATION=${PIPELINE_DESTINATION:-duckdb}
+      
+      # DuckDB Configuration
+      - DUCKDB_PATH=/data/gfn.duckdb
+      
+      # Snowflake Configuration (optional)
+      - SNOWFLAKE_ACCOUNT=${SNOWFLAKE_ACCOUNT:-}
+      - SNOWFLAKE_USER=${SNOWFLAKE_USER:-}
+      - SNOWFLAKE_PASSWORD=${SNOWFLAKE_PASSWORD:-}
+      - SNOWFLAKE_WAREHOUSE=${SNOWFLAKE_WAREHOUSE:-COMPUTE_WH}
+      - SNOWFLAKE_DATABASE=${SNOWFLAKE_DATABASE:-GFN}
+      - SNOWFLAKE_SCHEMA=${SNOWFLAKE_SCHEMA:-RAW}
+      
+      # LocalStack Configuration
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_REGION=us-east-1
+      - S3_BUCKET=gfn-data-lake
+    volumes:
+      - "./data:/data"
+      - "./logs:/app/logs"
+    depends_on:
+      localstack:
+        condition: service_healthy
+    networks:
+      - gfn-network
+    profiles:
+      - pipeline
+
+  # ===========================================================================
+  # DuckDB Web UI (Optional)
+  # ===========================================================================
+  duckdb-ui:
+    image: evidence/evidence:latest
+    container_name: gfn-duckdb-ui
+    ports:
+      - "3000:3000"
+    volumes:
+      - "./data:/data:ro"
+    environment:
+      - DATABASE_URL=duckdb:///data/gfn.duckdb
+    networks:
+      - gfn-network
+    profiles:
+      - ui
+
+networks:
+  gfn-network:
+    name: gfn-network
+    driver: bridge
+
+volumes: {}

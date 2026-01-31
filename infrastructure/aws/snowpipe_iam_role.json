@@ -1,0 +1,151 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "IAM Role for Snowflake Snowpipe S3 Integration",
+    
+    "Parameters": {
+        "SnowflakeAccountArn": {
+            "Type": "String",
+            "Default": "arn:aws:iam::000000000000:root",
+            "Description": "Snowflake AWS IAM User ARN (from DESC STORAGE INTEGRATION). Update after creating storage integration."
+        },
+        "SnowflakeExternalId": {
+            "Type": "String",
+            "Default": "placeholder-update-after-storage-integration",
+            "Description": "Snowflake External ID (from DESC STORAGE INTEGRATION). Update after creating storage integration."
+        },
+        "S3BucketName": {
+            "Type": "String",
+            "Default": "gfn-data-lake",
+            "Description": "S3 bucket name for data lake"
+        }
+    },
+    
+    "Resources": {
+        "SnowflakeRole": {
+            "Type": "AWS::IAM::Role",
+            "Properties": {
+                "RoleName": "gfn-snowflake-role",
+                "AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Principal": {
+                                "AWS": { "Ref": "SnowflakeAccountArn" }
+                            },
+                            "Action": "sts:AssumeRole",
+                            "Condition": {
+                                "StringEquals": {
+                                    "sts:ExternalId": { "Ref": "SnowflakeExternalId" }
+                                }
+                            }
+                        }
+                    ]
+                },
+                "Policies": [
+                    {
+                        "PolicyName": "gfn-snowflake-s3-access",
+                        "PolicyDocument": {
+                            "Version": "2012-10-17",
+                            "Statement": [
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "s3:GetObject",
+                                        "s3:GetObjectVersion"
+                                    ],
+                                    "Resource": {
+                                        "Fn::Sub": "arn:aws:s3:::${S3BucketName}/processed/*"
+                                    }
+                                },
+                                {
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "s3:ListBucket",
+                                        "s3:GetBucketLocation"
+                                    ],
+                                    "Resource": {
+                                        "Fn::Sub": "arn:aws:s3:::${S3BucketName}"
+                                    },
+                                    "Condition": {
+                                        "StringLike": {
+                                            "s3:prefix": ["processed/*"]
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "Tags": [
+                    {
+                        "Key": "Project",
+                        "Value": "GFN-Pipeline"
+                    },
+                    {
+                        "Key": "Purpose",
+                        "Value": "Snowpipe-S3-Integration"
+                    }
+                ]
+            }
+        },
+        
+        "SnowpipeSNSTopic": {
+            "Type": "AWS::SNS::Topic",
+            "Properties": {
+                "TopicName": "gfn-snowpipe-notifications",
+                "Tags": [
+                    {
+                        "Key": "Project",
+                        "Value": "GFN-Pipeline"
+                    }
+                ]
+            }
+        },
+        
+        "SnowpipeSNSPolicy": {
+            "Type": "AWS::SNS::TopicPolicy",
+            "Properties": {
+                "Topics": [{ "Ref": "SnowpipeSNSTopic" }],
+                "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": "AllowS3ToPublish",
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Service": "s3.amazonaws.com"
+                            },
+                            "Action": "sns:Publish",
+                            "Resource": { "Ref": "SnowpipeSNSTopic" },
+                            "Condition": {
+                                "ArnLike": {
+                                    "aws:SourceArn": {
+                                        "Fn::Sub": "arn:aws:s3:::${S3BucketName}"
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    },
+    
+    "Outputs": {
+        "RoleArn": {
+            "Description": "ARN of the IAM role for Snowflake",
+            "Value": { "Fn::GetAtt": ["SnowflakeRole", "Arn"] },
+            "Export": {
+                "Name": "GFN-Snowflake-Role-ARN"
+            }
+        },
+        "SNSTopicArn": {
+            "Description": "ARN of the SNS topic for Snowpipe notifications",
+            "Value": { "Ref": "SnowpipeSNSTopic" },
+            "Export": {
+                "Name": "GFN-Snowpipe-SNS-ARN"
+            }
+        }
+    }
+}

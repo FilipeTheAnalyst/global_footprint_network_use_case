@@ -1,190 +1,360 @@
-# AWS Architecture: GFN Carbon Footprint Ingestion Pipeline
-
-## High-Level Architecture Diagram
-
-```
 ┌─────────────────────────────────────────────────────────────────────────────────────────┐
-│                                    AWS CLOUD                                             │
+│                                    AWS ARCHITECTURE                                      │
+│                         GFN Carbon Footprint Ingestion Pipeline                          │
 │                                                                                          │
-│  ┌──────────────┐     ┌─────────────────────────────────────────────────────────────┐   │
-│  │              │     │                    STEP FUNCTIONS                            │   │
-│  │  EventBridge │────▶│  ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────────┐  │   │
-│  │  (Schedule)  │     │  │ Fetch   │──▶│ Store   │──▶│Transform│──▶│ Load to     │  │   │
-│  │  Daily/Weekly│     │  │Countries│   │ RAW S3  │   │ Data    │   │ Snowflake   │  │   │
-│  └──────────────┘     │  └─────────┘   └─────────┘   └─────────┘   └─────────────┘  │   │
-│         │             │       │             │             │              │           │   │
-│         │             └───────┼─────────────┼─────────────┼──────────────┼───────────┘   │
-│         │                     │             │             │              │               │
-│         ▼                     ▼             ▼             ▼              ▼               │
-│  ┌──────────────┐     ┌─────────────┐ ┌──────────┐ ┌──────────────┐ ┌──────────────┐    │
-│  │ API Gateway  │     │   Lambda    │ │    S3    │ │    Glue      │ │  Snowflake   │    │
-│  │ (On-demand   │────▶│  Functions  │ │  Bucket  │ │   (ETL)      │ │   (Target)   │    │
-│  │  trigger)    │     │             │ │  Bronze  │ │   or         │ │              │    │
-│  └──────────────┘     └─────────────┘ │  Silver  │ │   Lambda     │ └──────────────┘    │
-│                              │        └──────────┘ └──────────────┘        ▲            │
-│                              │             │              │                │            │
-│                              ▼             ▼              ▼                │            │
-│                       ┌─────────────────────────────────────────┐         │            │
-│                       │           SECRETS MANAGER               │         │            │
-│                       │  • GFN API Key                          │─────────┘            │
-│                       │  • Snowflake Credentials                │                      │
-│                       └─────────────────────────────────────────┘                      │
-│                                                                                         │
-│  ┌──────────────────────────────────────────────────────────────────────────────────┐  │
-│  │                              MONITORING & ALERTING                                │  │
-│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐  │  │
-│  │  │ CloudWatch │  │ CloudWatch │  │    SQS     │  │    SNS     │  │   Slack/   │  │  │
-│  │  │   Logs     │  │   Alarms   │  │    DLQ     │  │   Topics   │  │   Email    │  │  │
-│  │  └────────────┘  └────────────┘  └────────────┘  └────────────┘  └────────────┘  │  │
-│  └──────────────────────────────────────────────────────────────────────────────────┘  │
-│                                                                                         │
+│                              Updated: January 2026                                       │
 └─────────────────────────────────────────────────────────────────────────────────────────┘
 
-                                         │
-                                         ▼
-                              ┌─────────────────────┐
-                              │  GFN Public API     │
-                              │  api.footprint      │
-                              │  network.org/v1     │
-                              └─────────────────────┘
-```
 
-## Component Details
+═══════════════════════════════════════════════════════════════════════════════════════════
+                                    SYSTEM OVERVIEW
+═══════════════════════════════════════════════════════════════════════════════════════════
 
-### 1. TRIGGERING SYSTEM
+    ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+    │   TRIGGER   │────▶│   EXTRACT   │────▶│  TRANSFORM  │────▶│    LOAD     │
+    │             │     │             │     │             │     │             │
+    │ EventBridge │     │   Lambda    │     │   Lambda    │     │   Lambda    │
+    │ API Gateway │     │   + SQS     │     │   + SQS     │     │  Snowpipe   │
+    └─────────────┘     └──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+                               │                   │                   │
+                               ▼                   ▼                   ▼
+                        ┌─────────────────────────────────────────────────────┐
+                        │                    S3 DATA LAKE                      │
+                        │         raw/ ──▶ processed/ ──▶ Snowflake           │
+                        └─────────────────────────────────────────────────────┘
 
-| Component | Purpose | Configuration |
-|-----------|---------|---------------|
-| **EventBridge** | Scheduled execution | Cron: `0 6 * * MON` (weekly) or daily |
-| **API Gateway** | On-demand/backfill triggers | REST endpoint for manual runs |
 
-### 2. ORCHESTRATION (Step Functions)
+═══════════════════════════════════════════════════════════════════════════════════════════
+                                  DETAILED ARCHITECTURE
+═══════════════════════════════════════════════════════════════════════════════════════════
 
-State machine workflow:
-1. **FetchCountries** - Get list of countries from `/countries`
-2. **FanOut** - Parallel execution per country/year (Map state)
-3. **FetchData** - Call `/data/{country}/{year}/EFCtot` 
-4. **StoreRAW** - Write JSON/Parquet to S3 Bronze
-5. **Transform** - Clean, dedupe, compute derived fields
-6. **LoadSnowflake** - COPY INTO or Snowpipe
 
-### 3. RAW DATA STORAGE (S3)
+                                    ┌─────────────────┐
+                                    │   TRIGGERING    │
+                                    ├─────────────────┤
+                                    │                 │
+                    ┌───────────────│  EventBridge    │───────────────┐
+                    │               │  (Scheduler)    │               │
+                    │               │                 │               │
+                    │               │  Cron: Daily    │               │
+                    │               │  0 6 * * ? *    │               │
+                    │               │                 │               │
+                    │               │  API Gateway    │               │
+                    │               │  (Manual/Adhoc) │               │
+                    │               └─────────────────┘               │
+                    │                                                 │
+                    ▼                                                 │
+┌─────────────────────────────────┐                                   │
+│         EXTRACTION              │                                   │
+├─────────────────────────────────┤                                   │
+│                                 │                                   │
+│  ┌───────────┐    ┌──────────┐  │                                   │
+│  │  Lambda   │───▶│   SQS    │  │                                   │
+│  │ (Extract) │    │ (Buffer) │  │                                   │
+│  └───────────┘    └────┬─────┘  │                                   │
+│                        │        │                                   │
+│  • Async HTTP (aiohttp)│        │                                   │
+│  • Rate limiting       │        │                                   │
+│  • Bulk API calls      │        │                                   │
+│  • 8 concurrent req    │        │                                   │
+│  • Retry with backoff  │        │                                   │
+│                        │        │                                   │
+└────────────────────────┼────────┘                                   │
+                         │                                            │
+                         ▼                                            │
+┌─────────────────────────────────┐     ┌─────────────────────────────┐
+│         RAW STORAGE             │     │       MONITORING            │
+├─────────────────────────────────┤     ├─────────────────────────────┤
+│                                 │     │                             │
+│  ┌──────────────────────────┐   │     │  ┌───────────────────────┐  │
+│  │      S3 Bucket           │   │     │  │    CloudWatch         │  │
+│  │   (gfn-data-lake)        │   │     │  │                       │  │
+│  │                          │   │     │  │  • Lambda Metrics     │  │
+│  │  └─ raw/                 │   │     │  │  • Custom Dashboards  │  │
+│  │     └─ carbon_footprint/ │   │     │  │  • Log Insights       │  │
+│  │        └─ YYYY/          │   │     │  │  • Alarms (SNS)       │  │
+│  │           └─ MM/         │   │     │  └───────────────────────┘  │
+│  │              └─ data.json│   │     │                             │
+│  └──────────────────────────┘   │     │  ┌───────────────────────┐  │
+│                                 │     │  │    X-Ray Tracing      │  │
+│  S3 Event Notification ─────────┼─────│  │  (End-to-end traces)  │  │
+│                                 │     │  └───────────────────────┘  │
+└─────────────────┬───────────────┘     └─────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────┐
+│       TRANSFORMATION            │
+├─────────────────────────────────┤
+│                                 │
+│  ┌───────────┐    ┌──────────┐  │
+│  │  Lambda   │───▶│   SQS    │  │
+│  │(Transform)│    │ (Buffer) │  │
+│  └───────────┘    └────┬─────┘  │
+│                        │        │
+│  • Schema validation   │        │
+│  • Data enrichment     │        │
+│  • Deduplication       │        │
+│  • Hash generation     │        │
+│  • Parquet conversion  │        │
+│                        │        │
+└────────────────────────┼────────┘
+                         │
+                         ▼
+┌─────────────────────────────────┐
+│      PROCESSED STORAGE          │
+├─────────────────────────────────┤
+│                                 │
+│  ┌──────────────────────────┐   │
+│  │      S3 Bucket           │   │
+│  │   (gfn-data-lake)        │   │
+│  │                          │   │
+│  │  └─ processed/           │   │
+│  │     └─ carbon_footprint/ │   │
+│  │        └─ YYYY/          │   │
+│  │           └─ MM/         │   │
+│  │              └─ data.parquet │
+│  └──────────────────────────┘   │
+│                                 │
+└─────────────────┬───────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────┐     ┌─────────────────────────────┐
+│       ORCHESTRATION             │     │      ERROR HANDLING         │
+├─────────────────────────────────┤     ├─────────────────────────────┤
+│                                 │     │                             │
+│  ┌──────────────────────────┐   │     │  ┌───────────────────────┐  │
+│  │    Step Functions        │   │     │  │    SQS DLQ            │  │
+│  │                          │   │     │  │  (Dead Letter Queue)  │  │
+│  │  ┌─────┐   ┌─────────┐   │   │     │  │                       │  │
+│  │  │Start│──▶│ Extract │   │   │     │  │  • Failed messages    │  │
+│  │  └─────┘   └────┬────┘   │   │     │  │  • 3 retry attempts   │  │
+│  │                 │        │   │     │  │  • 14 day retention   │  │
+│  │                 ▼        │   │     │  └───────────────────────┘  │
+│  │           ┌──────────┐   │   │     │                             │
+│  │           │Transform │   │   │     │  ┌───────────────────────┐  │
+│  │           └────┬─────┘   │   │     │  │    SNS Topic          │  │
+│  │                │         │   │     │  │  (Notifications)      │  │
+│  │                ▼         │   │     │  │                       │  │
+│  │           ┌──────────┐   │   │     │  │  • Success alerts     │  │
+│  │           │   Load   │   │   │     │  │  • Failure alerts     │  │
+│  │           └────┬─────┘   │   │     │  │  • Email/Slack/PD     │  │
+│  │                │         │   │     │  └───────────────────────┘  │
+│  │                ▼         │   │     │                             │
+│  │           ┌──────────┐   │   │     └─────────────────────────────┘
+│  │           │ Notify   │   │   │
+│  │           └──────────┘   │   │
+│  │                          │   │
+│  └──────────────────────────┘   │
+│                                 │
+└─────────────────┬───────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────┐
+│          LOADING                │
+├─────────────────────────────────┤
+│                                 │
+│  ┌───────────┐                  │
+│  │  Lambda   │                  │
+│  │  (Load)   │                  │
+│  └─────┬─────┘                  │
+│        │                        │
+│        │  Option A: Snowpipe    │
+│        │  (Auto-ingest)         │
+│        │                        │
+│        │  Option B: COPY INTO   │
+│        │  (Batch load)          │
+│        │                        │
+└────────┼────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────┐
+│        TARGET DATABASE          │
+├─────────────────────────────────┤
+│                                 │
+│  ┌──────────────────────────┐   │
+│  │       Snowflake          │   │
+│  │                          │   │
+│  │  ┌────────────────────┐  │   │
+│  │  │    RAW Schema      │  │   │
+│  │  │ CARBON_FOOTPRINT_  │  │   │
+│  │  │ RAW                │  │   │
+│  │  └─────────┬──────────┘  │   │
+│  │            │             │   │
+│  │            │ dbt         │   │
+│  │            ▼             │   │
+│  │  ┌────────────────────┐  │   │
+│  │  │   MART Schema      │  │   │
+│  │  │ CARBON_FOOTPRINT   │  │   │
+│  │  │ (Aggregated)       │  │   │
+│  │  └────────────────────┘  │   │
+│  │                          │   │
+│  └──────────────────────────┘   │
+│                                 │
+└─────────────────────────────────┘
 
-```
-s3://gfn-data-lake/
-├── bronze/                          # RAW (immutable)
-│   └── carbon_footprint/
-│       └── year=2010/
-│           └── ingest_dt=2026-01-30/
-│               └── part-00000.parquet
-├── silver/                          # Cleaned, typed
-│   └── carbon_footprint/
-│       └── year=2010/
-│           └── data.parquet
-└── gold/                            # Aggregated (optional)
-```
 
-### 4. PROCESSING OPTIONS
+═══════════════════════════════════════════════════════════════════════════════════════════
+                                   PROJECT STRUCTURE
+═══════════════════════════════════════════════════════════════════════════════════════════
 
-| Option | When to Use | Pros | Cons |
-|--------|-------------|------|------|
-| **Lambda** | Small payloads (<15 min) | Serverless, cheap | Timeout limits |
-| **Glue (Spark)** | Large transforms | Scalable, managed | Cold start, cost |
-| **ECS Fargate** | Long-running, custom | Flexible | More ops overhead |
+    global_footprint_network_use_case/
+    │
+    ├── src/gfn_pipeline/              # Core pipeline package
+    │   ├── __init__.py                # Exports: run_pipeline, gfn_source
+    │   ├── main.py                    # PipelineRunner class (CLI entry point)
+    │   └── pipeline_async.py          # Async extraction with dlt
+    │
+    ├── infrastructure/                # AWS infrastructure
+    │   ├── lambda_handlers.py         # Lambda functions (extract/transform/load)
+    │   ├── setup_localstack.py        # LocalStack setup for local dev
+    │   ├── setup_snowflake_production.py  # Snowflake production setup
+    │   └── load_to_snowflake.py       # Snowflake loading utilities
+    │
+    ├── api/                           # FastAPI service
+    │   └── main.py                    # REST API for pipeline operations
+    │
+    ├── tests/                         # Test suite
+    │   └── test_pipeline.py           # Pipeline tests
+    │
+    ├── data/                          # Local data storage
+    │   └── raw/                       # Raw JSON extracts
+    │
+    ├── docs/                          # Documentation
+    │   └── ARCHITECTURE.md            # This file
+    │
+    ├── docker-compose.yml             # LocalStack + API containers
+    ├── Dockerfile                     # Lambda container image
+    ├── Dockerfile.api                 # API container image
+    ├── Makefile                       # Build/run commands
+    └── pyproject.toml                 # Dependencies (uv)
 
-**Recommendation**: Lambda for API calls + S3 writes; Glue for heavy transforms.
 
-### 5. SNOWFLAKE INTEGRATION
+═══════════════════════════════════════════════════════════════════════════════════════════
+                              OBSERVABILITY STRATEGY
+═══════════════════════════════════════════════════════════════════════════════════════════
 
-Two patterns:
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                     RECOMMENDED: AWS-NATIVE OBSERVABILITY STACK                          │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
 
-**A) Snowpipe (Auto-ingest)**
-```
-S3 Event → SQS → Snowpipe → RAW table
-```
-- Pros: Near real-time, fully managed
-- Cons: Less control over batching
+For an AWS + Snowflake data pipeline, the RECOMMENDED approach is AWS-native tools:
 
-**B) Orchestrated COPY (Recommended)**
-```
-Step Functions → Lambda → COPY INTO → MERGE into MART
-```
-- Pros: Full control, idempotent, audit trail
-- Cons: Slightly higher latency
+    ┌─────────────────────────────────────────────────────────────────────────────────┐
+    │                                                                                  │
+    │   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
+    │   │  CloudWatch  │    │    X-Ray     │    │  CloudWatch  │    │  Snowflake   │  │
+    │   │   Metrics    │    │   Tracing    │    │    Logs      │    │  Query Hist  │  │
+    │   └──────┬───────┘    └──────┬───────┘    └──────┬───────┘    └──────┬───────┘  │
+    │          │                   │                   │                   │          │
+    │          └───────────────────┴───────────────────┴───────────────────┘          │
+    │                                      │                                           │
+    │                                      ▼                                           │
+    │                         ┌────────────────────────┐                               │
+    │                         │  CloudWatch Dashboards │                               │
+    │                         │  + Alarms + SNS        │                               │
+    │                         └────────────────────────┘                               │
+    │                                                                                  │
+    └─────────────────────────────────────────────────────────────────────────────────┘
 
-### 6. MONITORING SYSTEM
 
-| Component | Monitors | Alert Condition |
-|-----------|----------|-----------------|
-| **CloudWatch Logs** | Lambda/Glue execution | Error patterns |
-| **CloudWatch Alarms** | Step Functions failures | ExecutionsFailed > 0 |
-| **SQS DLQ** | Failed messages | Messages in DLQ > 0 |
-| **SNS** | Notifications | Triggers Slack/Email |
-| **Custom Metrics** | Row counts, latency | Deviation from baseline |
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                         OBSERVABILITY STACK                                              │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
 
----
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │  LAYER              │  TOOL                    │  PURPOSE                      │
+    ├────────────────────────────────────────────────────────────────────────────────┤
+    │  Metrics            │  CloudWatch Metrics      │  Lambda duration, errors,     │
+    │                     │                          │  invocations, throttles       │
+    │                     │                          │                               │
+    │  Logs               │  CloudWatch Logs         │  Structured JSON logs,        │
+    │                     │  + Log Insights          │  searchable, retention        │
+    │                     │                          │                               │
+    │  Tracing            │  AWS X-Ray               │  End-to-end request tracing   │
+    │                     │                          │  across Lambda → S3 → SNS     │
+    │                     │                          │                               │
+    │  Alerting           │  CloudWatch Alarms       │  Threshold-based alerts       │
+    │                     │  + SNS                   │  → Email/Slack/PagerDuty      │
+    │                     │                          │                               │
+    │  Dashboards         │  CloudWatch Dashboards   │  Unified view of pipeline     │
+    │                     │                          │  health and performance       │
+    │                     │                          │                               │
+    │  Data Quality       │  Soda                    │  Row counts, freshness,       │
+    │                     │                          │  schema validation, anomalies │
+    │                     │                          │                               │
+    │  Cost Monitoring    │  AWS Cost Explorer       │  Lambda/S3/Snowflake costs    │
+    │                     │  + Budgets               │  with alerts                  │
+    └────────────────────────────────────────────────────────────────────────────────┘
 
-## Data Flow Summary
 
-```
-GFN API ──▶ Lambda ──▶ S3 Bronze ──▶ Glue/Lambda ──▶ S3 Silver ──▶ Snowflake RAW ──▶ Snowflake MART
-   │                      │                              │               │                │
-   │                      │                              │               │                │
-   ▼                      ▼                              ▼               ▼                ▼
-HTTP Basic         Parquet files              Parquet files        COPY INTO          MERGE
-Auth               partitioned by            cleaned, typed        staging          deduplicated
-                   year/date                                                        + derived cols
-```
+┌─────────────────────────────────────────────────────────────────────────────────────────┐
+│                         DATA QUALITY WITH SODA                                           │
+└─────────────────────────────────────────────────────────────────────────────────────────┘
 
----
+    Soda provides data quality monitoring with native Snowflake integration:
 
-## Snowflake Table Design
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │  CHECK TYPE         │  EXAMPLE                 │  PURPOSE                      │
+    ├────────────────────────────────────────────────────────────────────────────────┤
+    │  Freshness          │  freshness < 24h         │  Ensure data is recent        │
+    │  Row Count          │  row_count > 0           │  Detect empty tables          │
+    │  Missing Values     │  missing_count = 0       │  Validate required fields     │
+    │  Duplicates         │  duplicate_count = 0     │  Ensure uniqueness            │
+    │  Schema             │  schema validation       │  Detect column changes        │
+    │  Anomaly Detection  │  anomaly score < 0.5     │  Detect unusual patterns      │
+    └────────────────────────────────────────────────────────────────────────────────┘
 
-### RAW Layer
-```sql
-CREATE TABLE GFN.RAW.CARBON_FOOTPRINT_RAW (
-    country_code INTEGER,
-    country_name VARCHAR,
-    iso_alpha2 VARCHAR(2),
-    year INTEGER,
-    carbon_footprint_gha FLOAT,
-    total_footprint_gha FLOAT,
-    score VARCHAR(10),
-    record_hash VARCHAR(64),
-    extracted_at TIMESTAMP_NTZ,
-    loaded_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
-);
-```
+    Usage:
+    ```bash
+    make soda-check  # Run all data quality checks
+    ```
 
-### MART Layer (Dashboard-ready)
-```sql
-CREATE TABLE GFN.MART.CARBON_FOOTPRINT (
-    country_code INTEGER,
-    country_name VARCHAR,
-    iso_alpha2 VARCHAR(2),
-    year INTEGER,
-    carbon_footprint_gha FLOAT,
-    total_footprint_gha FLOAT,
-    carbon_pct_of_total FLOAT,  -- Derived: carbon/total * 100
-    score VARCHAR(10),
-    PRIMARY KEY (country_code, year)
-);
-```
 
----
+═══════════════════════════════════════════════════════════════════════════════════════════
+                                  LOCAL DEVELOPMENT
+═══════════════════════════════════════════════════════════════════════════════════════════
 
-## Cost Optimization
+    ┌─────────────────────────────────────────────────────────────────────────────────┐
+    │                           LOCALSTACK SIMULATION                                  │
+    └─────────────────────────────────────────────────────────────────────────────────┘
 
-1. **S3 Lifecycle**: Move Bronze to Glacier after 90 days
-2. **Lambda**: Use ARM64 (Graviton2) for 20% cost savings
-3. **Glue**: Use Flex execution for non-time-critical jobs
-4. **Snowflake**: Auto-suspend warehouse after 60s idle
+    LocalStack provides local AWS service emulation for development:
 
----
+    ┌────────────────────┐     ┌────────────────────┐     ┌────────────────────┐
+    │    LocalStack      │     │    Docker          │     │    DuckDB          │
+    │                    │     │                    │     │                    │
+    │  • S3              │     │  • Lambda runtime  │     │  • Local testing   │
+    │  • SQS             │     │  • API container   │     │  • Fast iteration  │
+    │  • EventBridge     │     │  • Network bridge  │     │  • No cloud costs  │
+    │  • SNS             │     │                    │     │                    │
+    └────────────────────┘     └────────────────────┘     └────────────────────┘
 
-## Security
+    Commands:
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │  make localstack-up      # Start LocalStack                                    │
+    │  make setup-localstack   # Create S3/SQS/EventBridge resources                 │
+    │  make test-extract       # Test extraction Lambda                              │
+    │  make test-transform     # Test transformation Lambda                          │
+    │  make test-load          # Test loading Lambda                                 │
+    │  make run-pipeline       # Run full pipeline locally                           │
+    └────────────────────────────────────────────────────────────────────────────────┘
 
-- **Secrets Manager**: Store API key + Snowflake creds (rotate every 90 days)
-- **IAM**: Least privilege (Lambda role can only write to specific S3 prefix)
-- **S3**: SSE-KMS encryption, bucket policy restricts access
-- **VPC**: Optional private endpoints for Snowflake
+
+═══════════════════════════════════════════════════════════════════════════════════════════
+                                  DATA FLOW SUMMARY
+═══════════════════════════════════════════════════════════════════════════════════════════
+
+    ┌─────────────────────────────────────────────────────────────────────────────────┐
+    │                                                                                  │
+    │   GFN API ──▶ Lambda ──▶ S3 (raw/) ──▶ Lambda ──▶ S3 (processed/) ──▶ Snowflake │
+    │     │           │           │             │              │               │       │
+    │     │           │           │             │              │               │       │
+    │   REST API   Extract     JSON          Transform     Parquet          COPY      │
+    │   (bulk)     (async)    (raw)          (enrich)     (columnar)       INTO       │
+    │                                                                                  │
+    └─────────────────────────────────────────────────────────────────────────────────┘
+
+    Data Formats:
+    • Raw:       JSON (preserves API response structure)
+    • Processed: Parquet (columnar, compressed, schema-enforced)
+    • Target:    Snowflake tables (RAW → MART via dbt)

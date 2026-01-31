@@ -1,9 +1,0 @@
-requests>=2.31.0
-pandas>=2.1.0
-pyarrow>=14.0.0
-duckdb>=0.10.0
-boto3>=1.34.0
-tenacity>=8.2.3
-python-dotenv>=1.0.1
-snowflake-connector-python[pandas]>=3.6.0
-dlt[duckdb,snowflake,filesystem]>=1.0.0

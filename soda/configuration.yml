@@ -1,0 +1,12 @@
+# Soda Configuration for Snowflake
+# https://docs.soda.io/soda-core/configuration.html
+
+data_source snowflake:
+  type: snowflake
+  account: ${SNOWFLAKE_ACCOUNT}
+  username: ${SNOWFLAKE_USER}
+  password: ${SNOWFLAKE_PASSWORD}
+  warehouse: ${SNOWFLAKE_WAREHOUSE}
+  database: ${SNOWFLAKE_DATABASE}
+  schema: ${SNOWFLAKE_SCHEMA}
+  role: ${SNOWFLAKE_ROLE}
