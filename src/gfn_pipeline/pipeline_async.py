@@ -226,7 +226,7 @@ def get_record_types_sync(
         return _cached_record_types
     
     async def _fetch():
-        auth = aiohttp.BasicAuth("user", api_key)
+        auth = aiohttp.BasicAuth("", api_key)
         connector = aiohttp.TCPConnector(limit=5)
         timeout = aiohttp.ClientTimeout(total=30)
         
@@ -379,7 +379,7 @@ async def extract_all_data(
     Returns:
         Dictionary with keys: 'countries', 'footprint_data', 'record_types'
     """
-    auth = aiohttp.BasicAuth("user", config.api_key)
+    auth = aiohttp.BasicAuth("", config.api_key)
     rate_limiter = TokenBucketRateLimiter(
         rate=config.requests_per_second,
         burst=config.max_concurrent_requests

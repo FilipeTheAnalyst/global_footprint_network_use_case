@@ -115,7 +115,7 @@ async def _extract_all(start_year: int, end_year: int) -> list[dict]:
     if not GFN_API_KEY:
         raise ValueError("GFN_API_KEY environment variable required")
     
-    auth = aiohttp.BasicAuth("user", GFN_API_KEY)
+    auth = aiohttp.BasicAuth("", GFN_API_KEY)
     connector = aiohttp.TCPConnector(limit=10)
     timeout = aiohttp.ClientTimeout(total=30)
     
