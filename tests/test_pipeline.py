@@ -383,11 +383,10 @@ class TestLambdaLoadHandler:
             with patch('infrastructure.lambda_handlers._load_to_duckdb_bulk') as mock_load:
                 mock_load.return_value = 1
 
-                # Ensure no Snowflake account configured
                 with patch.dict(os.environ, {"SNOWFLAKE_ACCOUNT": ""}, clear=False):
                     result = handler_load({
                         "s3_bucket": "test-bucket",
-                        "s3_key": "processed/test/data.json"
+                        "s3_key": "transformed/test_data.json"
                     })
 
         assert result["status"] == "success"
@@ -415,7 +414,7 @@ class TestLambdaLoadHandler:
                 with patch.dict(os.environ, {"SNOWFLAKE_ACCOUNT": "test_account"}):
                     result = handler_load({
                         "s3_bucket": "test-bucket",
-                        "s3_key": "processed/test/data.json"
+                        "s3_key": "transformed/test_data.json"
                     })
 
         assert result["destination"] == "snowflake"
@@ -426,13 +425,13 @@ class TestLambdaLoadHandler:
 # ============================================================================
 
 class TestPipelineRunnerTransform:
-    """Tests for PipelineRunner transformation logic."""
+    """Tests for DltPipelineRunner transformation logic."""
 
     def test_transform_validates_required_fields(self):
         """Test that transform validates required fields."""
-        from gfn_pipeline.main import PipelineRunner
+        from gfn_pipeline.main import DltPipelineRunner
 
-        runner = PipelineRunner()
+        runner = DltPipelineRunner(use_s3=False)
 
         # New format: dict with countries and footprint_data
         data = {
@@ -453,9 +452,9 @@ class TestPipelineRunnerTransform:
 
     def test_transform_deduplicates(self):
         """Test that transform removes duplicates."""
-        from gfn_pipeline.main import PipelineRunner
+        from gfn_pipeline.main import DltPipelineRunner
 
-        runner = PipelineRunner()
+        runner = DltPipelineRunner(use_s3=False)
 
         data = {
             "countries": [],
@@ -473,9 +472,9 @@ class TestPipelineRunnerTransform:
 
     def test_transform_validates_record_type(self):
         """Test that transform requires record_type field."""
-        from gfn_pipeline.main import PipelineRunner
+        from gfn_pipeline.main import DltPipelineRunner
 
-        runner = PipelineRunner()
+        runner = DltPipelineRunner(use_s3=False)
 
         data = {
             "countries": [],
@@ -492,7 +491,11 @@ class TestPipelineRunnerTransform:
 
 
 class TestDuckDBLoad:
-    """Tests for DuckDB loading."""
+    """Tests for DuckDB loading via dlt.
+    
+    Note: These tests verify that dlt correctly loads data to DuckDB.
+    The DltPipelineRunner uses dlt for all loading operations.
+    """
 
     @pytest.fixture
     def temp_duckdb(self, tmp_path):
@@ -500,107 +503,126 @@ class TestDuckDBLoad:
         db_path = tmp_path / "test.duckdb"
         return str(db_path)
 
-    def test_load_to_duckdb_creates_table(self, temp_duckdb):
-        """Test that load creates table if not exists."""
+    def test_dlt_load_creates_table(self, temp_duckdb):
+        """Test that dlt load creates table if not exists."""
         import duckdb
-        from gfn_pipeline.main import PipelineRunner
+        import dlt
+        from gfn_pipeline.main import gfn_s3_source
 
-        with patch.dict(os.environ, {"DUCKDB_PATH": temp_duckdb}):
-            runner = PipelineRunner(destination="duckdb")
+        # Create a dlt pipeline pointing to temp DuckDB
+        pipeline = dlt.pipeline(
+            pipeline_name="test_pipeline",
+            destination=dlt.destinations.duckdb(temp_duckdb),
+            dataset_name="test_gfn",
+        )
 
-            # New format: dict with countries and footprint_data
-            data = {
-                "countries": [
-                    {
-                        "country_code": 1,
-                        "country_name": "Test Country",
-                        "iso_alpha2": "TC",
-                        "version": "2024",
-                        "extracted_at": datetime.now(timezone.utc).isoformat(),
-                        "transformed_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                ],
-                "footprint_data": [
-                    {
-                        "country_code": 1,
-                        "country_name": "Test Country",
-                        "iso_alpha2": "TC",
-                        "year": 2024,
-                        "record_type": "EFConsTotGHA",
-                        "record_type_description": "Ecological Footprint",
-                        "value": 400.0,
-                        "carbon": 100.0,
-                        "score": "A",
-                        "extracted_at": datetime.now(timezone.utc).isoformat(),
-                        "transformed_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                ]
-            }
+        # Test data
+        data = {
+            "countries": [
+                {
+                    "country_code": 1,
+                    "country_name": "Test Country",
+                    "iso_alpha2": "TC",
+                    "version": "2024",
+                    "extracted_at": datetime.now(timezone.utc).isoformat(),
+                    "transformed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+            "footprint_data": [
+                {
+                    "country_code": 1,
+                    "country_name": "Test Country",
+                    "iso_alpha2": "TC",
+                    "year": 2024,
+                    "record_type": "EFConsTotGHA",
+                    "record_type_description": "Ecological Footprint",
+                    "value": 400.0,
+                    "carbon": 100.0,
+                    "score": "A",
+                    "extracted_at": datetime.now(timezone.utc).isoformat(),
+                    "transformed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+            "record_types": [],
+        }
 
-            count = runner._load_to_duckdb(data)
+        # Create source and run pipeline
+        source = gfn_s3_source(data=data, enable_contracts=False)
+        load_info = pipeline.run(source)
 
-            assert count == 2  # 1 country + 1 footprint record
+        # Verify data was loaded
+        conn = duckdb.connect(temp_duckdb)
+        result = conn.execute("SELECT * FROM test_gfn.footprint_data").fetchall()
+        conn.close()
 
-            conn = duckdb.connect(temp_duckdb)
-            result = conn.execute("SELECT * FROM footprint_data").fetchall()
-            conn.close()
+        assert len(result) == 1
+        assert result[0][0] == 1  # country_code
 
-            assert len(result) == 1
-            assert result[0][0] == 1  # country_code
-
-    def test_load_to_duckdb_upserts(self, temp_duckdb):
-        """Test that load performs upsert on duplicate keys."""
+    def test_dlt_load_upserts(self, temp_duckdb):
+        """Test that dlt load performs merge on duplicate keys."""
         import duckdb
-        from gfn_pipeline.main import PipelineRunner
+        import dlt
+        from gfn_pipeline.main import gfn_s3_source
 
-        with patch.dict(os.environ, {"DUCKDB_PATH": temp_duckdb}):
-            runner = PipelineRunner(destination="duckdb")
+        # Create a dlt pipeline
+        pipeline = dlt.pipeline(
+            pipeline_name="test_pipeline_upsert",
+            destination=dlt.destinations.duckdb(temp_duckdb),
+            dataset_name="test_gfn",
+        )
 
-            data1 = {
-                "countries": [],
-                "footprint_data": [
-                    {
-                        "country_code": 1,
-                        "country_name": "Original Name",
-                        "iso_alpha2": "TC",
-                        "year": 2024,
-                        "record_type": "EFConsTotGHA",
-                        "value": 100.0,
-                        "carbon": 25.0,
-                        "score": "A",
-                        "extracted_at": datetime.now(timezone.utc).isoformat(),
-                        "transformed_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                ]
-            }
-            runner._load_to_duckdb(data1)
+        # First load
+        data1 = {
+            "countries": [],
+            "footprint_data": [
+                {
+                    "country_code": 1,
+                    "country_name": "Original Name",
+                    "iso_alpha2": "TC",
+                    "year": 2024,
+                    "record_type": "EFConsTotGHA",
+                    "value": 100.0,
+                    "carbon": 25.0,
+                    "score": "A",
+                    "extracted_at": datetime.now(timezone.utc).isoformat(),
+                    "transformed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+            "record_types": [],
+        }
+        source1 = gfn_s3_source(data=data1, enable_contracts=False)
+        pipeline.run(source1)
 
-            data2 = {
-                "countries": [],
-                "footprint_data": [
-                    {
-                        "country_code": 1,
-                        "country_name": "Updated Name",
-                        "iso_alpha2": "TC",
-                        "year": 2024,
-                        "record_type": "EFConsTotGHA",
-                        "value": 200.0,
-                        "carbon": 50.0,
-                        "score": "B",
-                        "extracted_at": datetime.now(timezone.utc).isoformat(),
-                        "transformed_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                ]
-            }
-            runner._load_to_duckdb(data2)
+        # Second load with updated values
+        data2 = {
+            "countries": [],
+            "footprint_data": [
+                {
+                    "country_code": 1,
+                    "country_name": "Updated Name",
+                    "iso_alpha2": "TC",
+                    "year": 2024,
+                    "record_type": "EFConsTotGHA",
+                    "value": 200.0,
+                    "carbon": 50.0,
+                    "score": "B",
+                    "extracted_at": datetime.now(timezone.utc).isoformat(),
+                    "transformed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+            "record_types": [],
+        }
+        source2 = gfn_s3_source(data=data2, enable_contracts=False)
+        pipeline.run(source2)
 
-            conn = duckdb.connect(temp_duckdb)
-            result = conn.execute("SELECT country_name, value FROM footprint_data").fetchall()
-            conn.close()
+        # Verify upsert worked
+        conn = duckdb.connect(temp_duckdb)
+        result = conn.execute("SELECT country_name, value FROM test_gfn.footprint_data").fetchall()
+        conn.close()
 
-            assert len(result) == 1
-            assert result[0][0] == "Updated Name"
-            assert result[0][1] == 200.0
+        assert len(result) == 1
+        assert result[0][0] == "Updated Name"
+        assert result[0][1] == 200.0
 
 
 # ============================================================================

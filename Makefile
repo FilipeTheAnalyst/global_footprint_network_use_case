@@ -5,9 +5,21 @@
 # Comprehensive build and deployment commands for the GFN data pipeline.
 # Supports LocalStack (AWS simulation), DuckDB (local), and Snowflake (production).
 #
+# Pipeline Architecture (dlt + S3 Data Lake):
+#   Extract (async) → S3 Raw → Soda Checks → S3 Staged → dlt → Destination
+#
+# S3 Structure:
+#   s3://gfn-data-lake/
+#   ├── raw/                    # Raw extracted data (immutable audit trail)
+#   │   └── gfn_footprint_{YYYYMMDD_HHMMSS}.json
+#   ├── staged/                 # Validated data ready for dlt
+#   │   └── gfn_footprint_{YYYYMMDD_HHMMSS}_staged.json
+#   └── transformed/            # Legacy: for Snowpipe
+#       └── gfn_footprint_{YYYYMMDD_HHMMSS}_transformed.json
+#
 # Quick Start:
 #   make setup              # Start LocalStack + setup AWS resources
-#   make run                # Run pipeline (DuckDB)
+#   make run                # Run pipeline (DuckDB) with S3 + dlt
 #   make run-snowflake      # Run pipeline (Snowflake)
 #   make docker-up          # Start all Docker services
 # =============================================================================
@@ -27,12 +39,26 @@ help:
 	@echo "║    make docker-pipeline        Run pipeline in Docker container               ║"
 	@echo "║    make docker-down            Stop all services                              ║"
 	@echo "║                                                                               ║"
-	@echo "║  LOCAL DEVELOPMENT                                                            ║"
+	@echo "║  PIPELINE (dlt + S3 Data Lake)                                                ║"
 	@echo "║  ──────────────────────────────────────────────────────────────────────────── ║"
-	@echo "║    make setup                  Start LocalStack + setup AWS resources         ║"
-	@echo "║    make run                    Run pipeline (DuckDB destination)              ║"
+	@echo "║    make run                    Run pipeline (DuckDB + S3 + dlt)               ║"
 	@echo "║    make run-snowflake          Run pipeline (Snowflake destination)           ║"
 	@echo "║    make run-both               Run pipeline (DuckDB + Snowflake)              ║"
+	@echo "║    make run-soda               Run pipeline with Soda checks                  ║"
+	@echo "║    make run-contracts          Run pipeline with data contracts               ║"
+	@echo "║    make run-production         Production: Snowflake + Soda + contracts       ║"
+	@echo "║    make run-full-refresh       Full refresh (replace all data)                ║"
+	@echo "║                                                                               ║"
+	@echo "║  DIRECT EXTRACTION (no S3)                                                    ║"
+	@echo "║  ──────────────────────────────────────────────────────────────────────────── ║"
+	@echo "║    make run-direct             Run dlt pipeline directly (no S3)              ║"
+	@echo "║    make run-direct-snowflake   Run dlt pipeline to Snowflake (no S3)          ║"
+	@echo "║                                                                               ║"
+	@echo "║  BACKFILL (Idempotent - safe to re-run)                                       ║"
+	@echo "║  ──────────────────────────────────────────────────────────────────────────── ║"
+	@echo "║    make backfill-full          Backfill all years (1961-2024)                 ║"
+	@echo "║    make backfill-recent        Backfill recent years (2020-2024)              ║"
+	@echo "║    make backfill YEARS=2010-2015  Custom year range backfill                  ║"
 	@echo "║                                                                               ║"
 	@echo "║  LAMBDA (LocalStack)                                                          ║"
 	@echo "║  ──────────────────────────────────────────────────────────────────────────── ║"
@@ -47,7 +73,7 @@ help:
 	@echo "║    make snowflake-verify       Verify Snowflake connection                    ║"
 	@echo "║    make load-to-snowflake      Load LocalStack data to Snowflake              ║"
 	@echo "║                                                                               ║"
-	@echo "║  DATA QUALITY                                                                  ║"
+	@echo "║  DATA QUALITY                                                                 ║"
 	@echo "║  ──────────────────────────────────────────────────────────────────────────── ║"
 	@echo "║    make soda-check             Run Soda data quality checks                   ║"
 	@echo "║                                                                               ║"
@@ -70,6 +96,10 @@ docker-up:
 	@sleep 5
 	@curl -s http://localhost:4566/_localstack/health | python -m json.tool || true
 	@echo "\n✓ LocalStack is ready at http://localhost:4566"
+
+docker-up-all:
+	@echo "Starting all services..."
+	docker compose --profile pipeline --profile ui up -d
 
 docker-pipeline:
 	@echo "Running pipeline in Docker..."
@@ -107,16 +137,13 @@ setup: docker-up
 	@echo "\n✓ Setup complete!"
 
 # =============================================================================
-# PIPELINE EXECUTION
+# PIPELINE EXECUTION (dlt + S3 Data Lake)
 # =============================================================================
 
+# Main pipeline command - uses dlt + S3 architecture
 run:
-	@echo "Running pipeline (DuckDB destination)..."
+	@echo "Running pipeline (DuckDB + S3 + dlt)..."
 	uv run python -m gfn_pipeline.main --destination duckdb
-
-run-local:
-	@echo "Running pipeline (DuckDB + local disk, no LocalStack)..."
-	uv run python -m gfn_pipeline.main --destination duckdb --no-localstack
 
 run-snowflake:
 	@echo "Running pipeline (Snowflake destination)..."
@@ -126,13 +153,89 @@ run-both:
 	@echo "Running pipeline (DuckDB + Snowflake)..."
 	uv run python -m gfn_pipeline.main --destination both
 
-run-dlt:
-	@echo "Running dlt pipeline..."
+run-soda:
+	@echo "Running pipeline with Soda data quality checks..."
+	uv run python -m gfn_pipeline.main --with-soda
+
+run-soda-warn:
+	@echo "Running pipeline with Soda checks (warn only)..."
+	uv run python -m gfn_pipeline.main --with-soda --soda-warn-only
+
+run-contracts:
+	@echo "Running pipeline with data contracts..."
+	uv run python -m gfn_pipeline.main --with-contracts
+
+run-full-refresh:
+	@echo "Running pipeline (full refresh)..."
+	uv run python -m gfn_pipeline.main --full-refresh
+
+run-production:
+	@echo "Running pipeline (production: Snowflake + Soda + contracts)..."
+	uv run python -m gfn_pipeline.main --destination snowflake --with-soda --with-contracts
+
+run-local:
+	@echo "Running pipeline without S3 storage..."
+	uv run python -m gfn_pipeline.main --destination duckdb --no-s3
+
+# =============================================================================
+# DIRECT EXTRACTION (no S3 - uses pipeline_async.py directly)
+# =============================================================================
+
+run-direct:
+	@echo "Running dlt pipeline directly (no S3)..."
 	uv run python -m gfn_pipeline.pipeline_async
 
-run-dlt-snowflake:
-	@echo "Running dlt pipeline (Snowflake)..."
+run-direct-snowflake:
+	@echo "Running dlt pipeline to Snowflake (no S3)..."
 	uv run python -m gfn_pipeline.pipeline_async --destination snowflake
+
+run-direct-full-refresh:
+	@echo "Running dlt pipeline with full refresh (no S3)..."
+	uv run python -m gfn_pipeline.pipeline_async --full-refresh
+
+# =============================================================================
+# BACKFILL COMMANDS (Idempotent - safe to re-run)
+# =============================================================================
+
+# Full backfill: 1961-2024 (all available years)
+backfill-full:
+	@echo "Running full backfill (1961-2024)..."
+	@echo "This is idempotent - existing records will be updated, not duplicated."
+	uv run python -m gfn_pipeline.main --start-year 1961 --end-year 2024 --full-refresh
+
+# Recent backfill: 2020-2024
+backfill-recent:
+	@echo "Running recent backfill (2020-2024)..."
+	uv run python -m gfn_pipeline.main --start-year 2020 --end-year 2024
+
+# Custom backfill: make backfill YEARS=2010-2015
+backfill:
+	@if [ -z "$(YEARS)" ]; then \
+		echo "Usage: make backfill YEARS=2010-2015"; \
+		exit 1; \
+	fi
+	@START_YEAR=$$(echo $(YEARS) | cut -d'-' -f1); \
+	END_YEAR=$$(echo $(YEARS) | cut -d'-' -f2); \
+	echo "Running backfill ($$START_YEAR-$$END_YEAR)..."; \
+	uv run python -m gfn_pipeline.main --start-year $$START_YEAR --end-year $$END_YEAR
+
+# Direct backfill (no S3)
+backfill-direct-full:
+	@echo "Running full direct backfill (1961-2024, no S3)..."
+	uv run python -m gfn_pipeline.pipeline_async --start-year 1961 --end-year 2024
+
+backfill-direct-recent:
+	@echo "Running recent direct backfill (2020-2024, no S3)..."
+	uv run python -m gfn_pipeline.pipeline_async --start-year 2020 --end-year 2024
+
+# Lambda-based backfill (LocalStack)
+lambda-backfill-full:
+	@echo "Running full Lambda backfill (1961-2024)..."
+	uv run python -m infrastructure.lambda_handlers extract --start-year 1961 --end-year 2024
+
+lambda-backfill-recent:
+	@echo "Running recent Lambda backfill (2020-2024)..."
+	uv run python -m infrastructure.lambda_handlers extract --start-year 2020 --end-year 2024
 
 # =============================================================================
 # LAMBDA COMMANDS (LocalStack)
@@ -150,7 +253,7 @@ lambda-invoke-extract:
 lambda-invoke-transform:
 	@echo "Invoking transform Lambda..."
 	@if [ -z "$(S3_KEY)" ]; then \
-		echo "Error: S3_KEY required. Usage: make lambda-invoke-transform S3_KEY=raw/..."; \
+		echo "Error: S3_KEY required. Usage: make lambda-invoke-transform S3_KEY=raw/gfn_footprint_...json"; \
 		exit 1; \
 	fi
 	uv run awslocal lambda invoke --function-name gfn-transform \
@@ -160,7 +263,7 @@ lambda-invoke-transform:
 lambda-invoke-load:
 	@echo "Invoking load Lambda..."
 	@if [ -z "$(S3_KEY)" ]; then \
-		echo "Error: S3_KEY required. Usage: make lambda-invoke-load S3_KEY=processed/..."; \
+		echo "Error: S3_KEY required. Usage: make lambda-invoke-load S3_KEY=transformed/gfn_footprint_...json"; \
 		exit 1; \
 	fi
 	uv run awslocal lambda invoke --function-name gfn-load \
@@ -242,7 +345,7 @@ conn = snowflake.connector.connect( \
     password=os.getenv('SNOWFLAKE_PASSWORD'), \
     warehouse=os.getenv('SNOWFLAKE_WAREHOUSE', 'COMPUTE_WH')); \
 cur = conn.cursor(); \
-cur.execute(\"SELECT SYSTEM\$$PIPE_STATUS('GFN.RAW.CARBON_FOOTPRINT_PIPE')\"); \
+cur.execute(\"SELECT SYSTEM\$$PIPE_STATUS('GFN.RAW.GFN_FOOTPRINT_PIPE')\"); \
 print(json.dumps(json.loads(cur.fetchone()[0]), indent=2)); \
 conn.close()"
 
@@ -265,8 +368,11 @@ aws-s3-ls:
 aws-s3-raw:
 	uv run awslocal s3 ls s3://gfn-data-lake/raw/ --recursive
 
-aws-s3-processed:
-	uv run awslocal s3 ls s3://gfn-data-lake/processed/ --recursive
+aws-s3-staged:
+	uv run awslocal s3 ls s3://gfn-data-lake/staged/ --recursive
+
+aws-s3-transformed:
+	uv run awslocal s3 ls s3://gfn-data-lake/transformed/ --recursive
 
 aws-sqs-ls:
 	uv run awslocal sqs list-queues
@@ -287,14 +393,14 @@ aws-events:
 
 duckdb-query:
 	@echo "Opening DuckDB CLI..."
-	uv run python -c "import duckdb; conn = duckdb.connect('gfn.duckdb'); print(conn.execute('SELECT COUNT(*) as records, COUNT(DISTINCT country_code) as countries FROM carbon_footprint').fetchdf())"
+	uv run python -c "import duckdb; conn = duckdb.connect('gfn.duckdb'); print(conn.execute('SELECT COUNT(*) as records, COUNT(DISTINCT country_code) as countries FROM footprint_data').fetchdf())"
 
 duckdb-summary:
 	@uv run python -c "\
 import duckdb; \
 conn = duckdb.connect('gfn.duckdb', read_only=True); \
 print('\\n=== DuckDB Summary ==='); \
-r = conn.execute('SELECT COUNT(*) as records, COUNT(DISTINCT country_code) as countries, COUNT(DISTINCT year) as years, MIN(year) as min_year, MAX(year) as max_year FROM carbon_footprint').fetchone(); \
+r = conn.execute('SELECT COUNT(*) as records, COUNT(DISTINCT country_code) as countries, COUNT(DISTINCT year) as years, MIN(year) as min_year, MAX(year) as max_year FROM footprint_data').fetchone(); \
 print(f'Records: {r[0]}'); \
 print(f'Countries: {r[1]}'); \
 print(f'Years: {r[3]}-{r[4]} ({r[2]} unique)'); \
@@ -304,7 +410,7 @@ duckdb-top-emitters:
 	@uv run python -c "\
 import duckdb; \
 conn = duckdb.connect('gfn.duckdb', read_only=True); \
-print(conn.execute('SELECT country_name, year, ROUND(carbon_footprint_gha/1e6, 2) as carbon_million_gha FROM carbon_footprint WHERE year = 2024 ORDER BY carbon_footprint_gha DESC NULLS LAST LIMIT 10').fetchdf().to_string()); \
+print(conn.execute('SELECT country_name, year, ROUND(carbon/1e6, 2) as carbon_million_gha FROM footprint_data WHERE year = 2024 AND record_type LIKE \"%Carbon%\" ORDER BY carbon DESC NULLS LAST LIMIT 10').fetchdf().to_string()); \
 "
 
 # =============================================================================
@@ -333,7 +439,7 @@ logs:
 clean:
 	rm -rf localstack-data/
 	rm -rf data/raw/*.json
-	rm -rf data/processed/
+	rm -rf data/transformed/
 	rm -f *.duckdb *.duckdb.wal
 	rm -rf __pycache__ **/__pycache__
 	rm -rf .pytest_cache
@@ -351,11 +457,11 @@ clean-docker:
 # =============================================================================
 
 sync-to-aws:
-	@echo "Syncing processed data from LocalStack to real AWS S3..."
+	@echo "Syncing transformed data from LocalStack to real AWS S3..."
 	@echo "Downloading from LocalStack..."
 	@mkdir -p /tmp/gfn-sync
-	@uv run awslocal s3 sync s3://gfn-data-lake/processed/ /tmp/gfn-sync/processed/
+	@uv run awslocal s3 sync s3://gfn-data-lake/transformed/ /tmp/gfn-sync/transformed/
 	@echo "Uploading to real AWS S3..."
-	@aws s3 sync /tmp/gfn-sync/processed/ s3://${S3_BUCKET}/processed/
+	@aws s3 sync /tmp/gfn-sync/transformed/ s3://${S3_BUCKET}/transformed/
 	@rm -rf /tmp/gfn-sync
 	@echo "✓ Sync complete. Snowpipe should pick up new files."

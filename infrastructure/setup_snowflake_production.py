@@ -228,7 +228,7 @@ def setup_localstack_resources():
         print(f"  ✓ S3 bucket: {S3_BUCKET} ({e})")
 
     # Create folder structure
-    for prefix in ["raw/gfn_footprint_data/", "processed/gfn_footprint_data/", "failed/"]:
+    for prefix in ["raw/", "transformed/", "failed/"]:
         s3.put_object(Bucket=S3_BUCKET, Key=f"{prefix}.keep", Body=b"placeholder")
     print("  ✓ Created S3 folder structure")
 
@@ -327,7 +327,7 @@ def setup_localstack_resources():
                         "Filter": {
                             "Key": {
                                 "FilterRules": [
-                                    {"Name": "prefix", "Value": "processed/gfn_footprint_data/"},
+                                    {"Name": "prefix", "Value": "transformed/"},
                                     {"Name": "suffix", "Value": ".json"},
                                 ]
                             }
@@ -483,7 +483,7 @@ def configure_s3_notifications(sqs_arn: str):
                 "Filter": {
                     "Key": {
                         "FilterRules": [
-                            {"Name": "prefix", "Value": "processed/gfn_footprint_data/"},
+                            {"Name": "prefix", "Value": "transformed/"},
                             {"Name": "suffix", "Value": ".json"},
                         ]
                     }
@@ -1030,7 +1030,7 @@ This script will:
     print("""
 Next steps:
   1. Upload a test file to S3:
-     aws s3 cp test.json s3://gfn-data-lake/processed/gfn_footprint_data/
+     aws s3 cp test.json s3://gfn-data-lake/transformed/
 
   2. Check Snowpipe status:
      SELECT SYSTEM$PIPE_STATUS('GFN.RAW.GFN_FOOTPRINT_DATA_PIPE');

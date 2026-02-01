@@ -1,6 +1,6 @@
 {
     "AWSTemplateFormatVersion": "2010-09-09",
-    "Description": "IAM Role for Snowflake Snowpipe S3 Integration",
+    "Description": "IAM Role for Snowflake Snowpipe S3 Integration - GFN Pipeline",
     
     "Parameters": {
         "SnowflakeAccountArn": {
@@ -44,21 +44,23 @@
                 },
                 "Policies": [
                     {
-                        "PolicyName": "gfn-snowflake-s3-access",
+                        "PolicyName": "gfn-snowflake-s3-read",
                         "PolicyDocument": {
                             "Version": "2012-10-17",
                             "Statement": [
                                 {
+                                    "Sid": "ReadTransformedData",
                                     "Effect": "Allow",
                                     "Action": [
                                         "s3:GetObject",
                                         "s3:GetObjectVersion"
                                     ],
                                     "Resource": {
-                                        "Fn::Sub": "arn:aws:s3:::${S3BucketName}/processed/*"
+                                        "Fn::Sub": "arn:aws:s3:::${S3BucketName}/transformed/*"
                                     }
                                 },
                                 {
+                                    "Sid": "ListTransformedFolder",
                                     "Effect": "Allow",
                                     "Action": [
                                         "s3:ListBucket",
@@ -69,7 +71,7 @@
                                     },
                                     "Condition": {
                                         "StringLike": {
-                                            "s3:prefix": ["processed/*"]
+                                            "s3:prefix": ["transformed/*"]
                                         }
                                     }
                                 }
@@ -94,6 +96,7 @@
             "Type": "AWS::SNS::Topic",
             "Properties": {
                 "TopicName": "gfn-snowpipe-notifications",
+                "DisplayName": "GFN Snowpipe S3 Event Notifications",
                 "Tags": [
                     {
                         "Key": "Project",
@@ -129,6 +132,72 @@
                     ]
                 }
             }
+        },
+        
+        "S3Bucket": {
+            "Type": "AWS::S3::Bucket",
+            "Properties": {
+                "BucketName": { "Ref": "S3BucketName" },
+                "NotificationConfiguration": {
+                    "TopicConfigurations": [
+                        {
+                            "Event": "s3:ObjectCreated:*",
+                            "Filter": {
+                                "S3Key": {
+                                    "Rules": [
+                                        {
+                                            "Name": "prefix",
+                                            "Value": "transformed/"
+                                        },
+                                        {
+                                            "Name": "suffix",
+                                            "Value": ".json"
+                                        }
+                                    ]
+                                }
+                            },
+                            "Topic": { "Ref": "SnowpipeSNSTopic" }
+                        }
+                    ]
+                },
+                "LifecycleConfiguration": {
+                    "Rules": [
+                        {
+                            "Id": "ArchiveRawData",
+                            "Status": "Enabled",
+                            "Prefix": "raw/",
+                            "Transitions": [
+                                {
+                                    "StorageClass": "STANDARD_IA",
+                                    "TransitionInDays": 30
+                                },
+                                {
+                                    "StorageClass": "GLACIER",
+                                    "TransitionInDays": 90
+                                }
+                            ]
+                        },
+                        {
+                            "Id": "ArchiveTransformedData",
+                            "Status": "Enabled",
+                            "Prefix": "transformed/",
+                            "Transitions": [
+                                {
+                                    "StorageClass": "STANDARD_IA",
+                                    "TransitionInDays": 60
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "Tags": [
+                    {
+                        "Key": "Project",
+                        "Value": "GFN-Pipeline"
+                    }
+                ]
+            },
+            "DependsOn": "SnowpipeSNSPolicy"
         }
     },
     
@@ -146,6 +215,17 @@
             "Export": {
                 "Name": "GFN-Snowpipe-SNS-ARN"
             }
+        },
+        "S3BucketArn": {
+            "Description": "ARN of the S3 bucket",
+            "Value": { "Fn::GetAtt": ["S3Bucket", "Arn"] },
+            "Export": {
+                "Name": "GFN-S3-Bucket-ARN"
+            }
+        },
+        "S3BucketDomainName": {
+            "Description": "Domain name of the S3 bucket",
+            "Value": { "Fn::GetAtt": ["S3Bucket", "DomainName"] }
         }
     }
 }

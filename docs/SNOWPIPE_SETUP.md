@@ -1,216 +1,553 @@
 # Snowpipe Setup Guide
 
-This guide walks through setting up Snowpipe for automatic data ingestion from S3 to Snowflake.
+Production setup for AWS S3 → Snowflake integration using Snowpipe.
+
+---
+
+## Prerequisites
+
+- AWS Account with S3 bucket access
+- Snowflake account with ACCOUNTADMIN privileges
+- GFN API key (from [footprintnetwork.org](https://www.footprintnetwork.org/))
+
+---
 
 ## Architecture Overview
 
 ```
-S3 (processed/) → SNS → Snowpipe → RAW → Stream → Task → STAGING → Task → MART
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              SNOWPIPE ARCHITECTURE                                   │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│   S3 Bucket                    SNS Topic                 Snowflake                  │
+│   ─────────                    ─────────                 ─────────                  │
+│   gfn-data-lake/               gfn-snowpipe              GFN_PIPELINE               │
+│   └── transformed/  ──────────▶ (notification) ─────────▶ FOOTPRINT_DATA_PIPE      │
+│       └── *.json               (ObjectCreated)           (auto-ingest)              │
+│                                                                                      │
+│                                                          │                          │
+│                                                          ▼                          │
+│                                                   ┌─────────────────┐               │
+│                                                   │ RAW.FOOTPRINT_  │               │
+│                                                   │ DATA_RAW        │               │
+│                                                   └────────┬────────┘               │
+│                                                            │                        │
+│                                                            │ Stream + Task          │
+│                                                            ▼                        │
+│                                                   ┌─────────────────┐               │
+│                                                   │ TRANSFORMED.    │               │
+│                                                   │ FOOTPRINT_DATA  │               │
+│                                                   └────────┬────────┘               │
+│                                                            │                        │
+│                                                            │ Task                   │
+│                                                            ▼                        │
+│                                                   ┌─────────────────┐               │
+│                                                   │ ANALYTICS.      │               │
+│                                                   │ FOOTPRINT_      │               │
+│                                                   │ SUMMARY         │               │
+│                                                   └─────────────────┘               │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**Key Benefits:**
-- **Serverless**: No warehouse needed for ingestion
-- **Sub-minute latency**: Data available in seconds
-- **Automatic deduplication**: Files are tracked and never reprocessed
-- **Cost-effective**: Pay only for compute used
+---
 
-## Prerequisites
+## Step 1: AWS S3 Bucket Setup
 
-1. AWS Account with S3 bucket (`gfn-data-lake`)
-2. Snowflake Account with ACCOUNTADMIN privileges
-3. AWS CLI configured
-
-## Step 1: Deploy AWS IAM Role
+### 1.1 Create S3 Bucket
 
 ```bash
-# Deploy CloudFormation stack (first time - leave parameters empty)
-aws cloudformation create-stack \
-    --stack-name gfn-snowpipe-role \
-    --template-body file://infrastructure/aws/snowpipe_iam_role.json \
-    --capabilities CAPABILITY_NAMED_IAM \
-    --parameters \
-        ParameterKey=SnowflakeAccountArn,ParameterValue=PLACEHOLDER \
-        ParameterKey=SnowflakeExternalId,ParameterValue=PLACEHOLDER
+aws s3 mb s3://gfn-data-lake --region us-east-1
 ```
 
-## Step 2: Create Snowflake Storage Integration
-
-Run in Snowflake:
-
-```sql
--- Run: infrastructure/snowflake/01_setup_storage.sql
-
--- After running, get the integration details:
-DESC STORAGE INTEGRATION gfn_s3_integration;
-```
-
-Copy these values:
-- `STORAGE_AWS_IAM_USER_ARN` (e.g., `arn:aws:iam::123456789012:user/abc123`)
-- `STORAGE_AWS_EXTERNAL_ID` (e.g., `GFN_SFCRole=2_abcdefg...`)
-
-## Step 3: Update AWS IAM Role Trust Policy
+### 1.2 Create Folder Structure
 
 ```bash
-# Update the CloudFormation stack with actual values
-aws cloudformation update-stack \
-    --stack-name gfn-snowpipe-role \
-    --template-body file://infrastructure/aws/snowpipe_iam_role.json \
-    --capabilities CAPABILITY_NAMED_IAM \
-    --parameters \
-        ParameterKey=SnowflakeAccountArn,ParameterValue=<STORAGE_AWS_IAM_USER_ARN> \
-        ParameterKey=SnowflakeExternalId,ParameterValue=<STORAGE_AWS_EXTERNAL_ID>
+aws s3api put-object --bucket gfn-data-lake --key raw/
+aws s3api put-object --bucket gfn-data-lake --key transformed/
+aws s3api put-object --bucket gfn-data-lake --key failed/
 ```
 
-## Step 4: Configure S3 Event Notifications
+### 1.3 Enable Event Notifications (After SNS Setup)
 
 ```bash
-# Get the SNS topic ARN
-SNS_ARN=$(aws cloudformation describe-stacks \
-    --stack-name gfn-snowpipe-role \
-    --query 'Stacks[0].Outputs[?OutputKey==`SNSTopicArn`].OutputValue' \
-    --output text)
-
-# Configure S3 to send events to SNS
 aws s3api put-bucket-notification-configuration \
-    --bucket gfn-data-lake \
-    --notification-configuration '{
-        "TopicConfigurations": [
-            {
-                "TopicArn": "'$SNS_ARN'",
-                "Events": ["s3:ObjectCreated:*"],
-                "Filter": {
-                    "Key": {
-                        "FilterRules": [
-                            {"Name": "prefix", "Value": "processed/"},
-                            {"Name": "suffix", "Value": ".json"}
-                        ]
-                    }
-                }
-            }
-        ]
-    }'
+  --bucket gfn-data-lake \
+  --notification-configuration '{
+    "TopicConfigurations": [{
+      "TopicArn": "arn:aws:sns:us-east-1:ACCOUNT_ID:gfn-snowpipe",
+      "Events": ["s3:ObjectCreated:*"],
+      "Filter": {
+        "Key": {
+          "FilterRules": [{
+            "Name": "prefix",
+            "Value": "transformed/"
+          }]
+        }
+      }
+    }]
+  }'
 ```
 
-## Step 5: Create Snowpipe and Tasks
+---
 
-Run in Snowflake:
+## Step 2: Snowflake Storage Integration
+
+### 2.1 Create Storage Integration
+
+Run in Snowflake (requires ACCOUNTADMIN):
 
 ```sql
--- Run: infrastructure/snowflake/02_snowpipe.sql
--- Run: infrastructure/snowflake/03_monitoring.sql
+USE ROLE ACCOUNTADMIN;
+
+CREATE OR REPLACE STORAGE INTEGRATION GFN_S3_INTEGRATION
+  TYPE = EXTERNAL_STAGE
+  STORAGE_PROVIDER = 'S3'
+  ENABLED = TRUE
+  STORAGE_AWS_ROLE_ARN = 'arn:aws:iam::ACCOUNT_ID:role/snowflake-gfn-role'
+  STORAGE_ALLOWED_LOCATIONS = ('s3://gfn-data-lake/transformed/');
 ```
 
-## Step 6: Verify Setup
+### 2.2 Get Integration Details
+
+```sql
+DESC INTEGRATION GFN_S3_INTEGRATION;
+```
+
+Note the values for:
+- `STORAGE_AWS_IAM_USER_ARN` (e.g., `arn:aws:iam::123456789012:user/abc123`)
+- `STORAGE_AWS_EXTERNAL_ID` (e.g., `GFN_SFCRole=2_xyz123`)
+
+---
+
+## Step 3: AWS IAM Role Setup
+
+### 3.1 Create IAM Role
+
+Create `snowflake-gfn-role` with trust policy:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "STORAGE_AWS_IAM_USER_ARN_FROM_STEP_2"
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": {
+          "sts:ExternalId": "STORAGE_AWS_EXTERNAL_ID_FROM_STEP_2"
+        }
+      }
+    }
+  ]
+}
+```
+
+### 3.2 Attach S3 Policy
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::gfn-data-lake",
+        "arn:aws:s3:::gfn-data-lake/transformed/*"
+      ]
+    }
+  ]
+}
+```
+
+---
+
+## Step 4: Snowflake Database Setup
+
+### 4.1 Create Database and Schemas
+
+```sql
+-- Create database
+CREATE DATABASE IF NOT EXISTS GFN_PIPELINE;
+USE DATABASE GFN_PIPELINE;
+
+-- Create schemas
+CREATE SCHEMA IF NOT EXISTS RAW;
+CREATE SCHEMA IF NOT EXISTS TRANSFORMED;
+CREATE SCHEMA IF NOT EXISTS ANALYTICS;
+CREATE SCHEMA IF NOT EXISTS MONITORING;
+```
+
+### 4.2 Create External Stage
+
+```sql
+USE SCHEMA RAW;
+
+CREATE OR REPLACE STAGE GFN_TRANSFORMED_STAGE
+  STORAGE_INTEGRATION = GFN_S3_INTEGRATION
+  URL = 's3://gfn-data-lake/transformed/'
+  FILE_FORMAT = (TYPE = 'JSON');
+```
+
+### 4.3 Create Raw Table
+
+```sql
+CREATE OR REPLACE TABLE RAW.FOOTPRINT_DATA_RAW (
+    raw_data VARIANT,
+    _loaded_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    _source_file VARCHAR
+);
+```
+
+### 4.4 Create Transformed Table
+
+```sql
+CREATE OR REPLACE TABLE TRANSFORMED.FOOTPRINT_DATA (
+    unique_key VARCHAR PRIMARY KEY,
+    country_code INTEGER,
+    country_name VARCHAR,
+    iso_alpha2 VARCHAR(2),
+    year INTEGER,
+    record_type VARCHAR,
+    carbon_footprint_gha FLOAT,
+    score VARCHAR(10),
+    extracted_at TIMESTAMP_NTZ,
+    transformed_at TIMESTAMP_NTZ,
+    _loaded_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    _updated_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+```
+
+### 4.5 Create Analytics Table
+
+```sql
+CREATE OR REPLACE TABLE ANALYTICS.FOOTPRINT_SUMMARY (
+    country_code INTEGER,
+    country_name VARCHAR,
+    iso_alpha2 VARCHAR(2),
+    year INTEGER,
+    total_carbon_footprint_gha FLOAT,
+    record_count INTEGER,
+    latest_score VARCHAR(10),
+    _updated_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(),
+    PRIMARY KEY (country_code, year)
+);
+```
+
+---
+
+## Step 5: Snowpipe Setup
+
+### 5.1 Create Snowpipe
+
+```sql
+USE SCHEMA RAW;
+
+CREATE OR REPLACE PIPE FOOTPRINT_DATA_PIPE
+  AUTO_INGEST = TRUE
+  AS
+  COPY INTO RAW.FOOTPRINT_DATA_RAW (raw_data, _source_file)
+  FROM (
+    SELECT $1, METADATA$FILENAME
+    FROM @GFN_TRANSFORMED_STAGE
+  )
+  FILE_FORMAT = (TYPE = 'JSON');
+```
+
+### 5.2 Get Snowpipe Notification Channel
+
+```sql
+SHOW PIPES;
+-- Note the notification_channel value (SQS ARN)
+```
+
+---
+
+## Step 6: AWS SNS Setup
+
+### 6.1 Create SNS Topic
+
+```bash
+aws sns create-topic --name gfn-snowpipe --region us-east-1
+```
+
+### 6.2 Subscribe Snowpipe SQS
+
+```bash
+aws sns subscribe \
+  --topic-arn arn:aws:sns:us-east-1:ACCOUNT_ID:gfn-snowpipe \
+  --protocol sqs \
+  --notification-endpoint SNOWPIPE_SQS_ARN_FROM_STEP_5
+```
+
+### 6.3 Configure S3 Event Notifications
+
+```bash
+aws s3api put-bucket-notification-configuration \
+  --bucket gfn-data-lake \
+  --notification-configuration '{
+    "TopicConfigurations": [{
+      "TopicArn": "arn:aws:sns:us-east-1:ACCOUNT_ID:gfn-snowpipe",
+      "Events": ["s3:ObjectCreated:*"],
+      "Filter": {
+        "Key": {
+          "FilterRules": [{
+            "Name": "prefix",
+            "Value": "transformed/"
+          }]
+        }
+      }
+    }]
+  }'
+```
+
+---
+
+## Step 7: Stream and Tasks
+
+### 7.1 Create Stream
+
+```sql
+CREATE OR REPLACE STREAM RAW.FOOTPRINT_DATA_STREAM
+  ON TABLE RAW.FOOTPRINT_DATA_RAW;
+```
+
+### 7.2 Create Processing Task
+
+```sql
+CREATE OR REPLACE TASK TRANSFORMED.PROCESS_FOOTPRINT_DATA_TASK
+  WAREHOUSE = COMPUTE_WH
+  SCHEDULE = '1 MINUTE'
+  WHEN SYSTEM$STREAM_HAS_DATA('RAW.FOOTPRINT_DATA_STREAM')
+AS
+MERGE INTO TRANSFORMED.FOOTPRINT_DATA AS target
+USING (
+    SELECT
+        raw_data:unique_key::VARCHAR AS unique_key,
+        raw_data:country_code::INTEGER AS country_code,
+        raw_data:country_name::VARCHAR AS country_name,
+        raw_data:iso_alpha2::VARCHAR AS iso_alpha2,
+        raw_data:year::INTEGER AS year,
+        raw_data:record_type::VARCHAR AS record_type,
+        raw_data:carbon_footprint_gha::FLOAT AS carbon_footprint_gha,
+        raw_data:score::VARCHAR AS score,
+        raw_data:extracted_at::TIMESTAMP_NTZ AS extracted_at,
+        raw_data:transformed_at::TIMESTAMP_NTZ AS transformed_at
+    FROM RAW.FOOTPRINT_DATA_STREAM
+    WHERE METADATA$ACTION = 'INSERT'
+) AS source
+ON target.unique_key = source.unique_key
+WHEN MATCHED THEN UPDATE SET
+    target.carbon_footprint_gha = source.carbon_footprint_gha,
+    target.score = source.score,
+    target.extracted_at = source.extracted_at,
+    target.transformed_at = source.transformed_at,
+    target._updated_at = CURRENT_TIMESTAMP()
+WHEN NOT MATCHED THEN INSERT (
+    unique_key, country_code, country_name, iso_alpha2, year,
+    record_type, carbon_footprint_gha, score, extracted_at, transformed_at
+) VALUES (
+    source.unique_key, source.country_code, source.country_name,
+    source.iso_alpha2, source.year, source.record_type,
+    source.carbon_footprint_gha, source.score,
+    source.extracted_at, source.transformed_at
+);
+```
+
+### 7.3 Create Analytics Task
+
+```sql
+CREATE OR REPLACE TASK ANALYTICS.UPDATE_FOOTPRINT_SUMMARY_TASK
+  WAREHOUSE = COMPUTE_WH
+  AFTER TRANSFORMED.PROCESS_FOOTPRINT_DATA_TASK
+AS
+MERGE INTO ANALYTICS.FOOTPRINT_SUMMARY AS target
+USING (
+    SELECT
+        country_code,
+        country_name,
+        iso_alpha2,
+        year,
+        SUM(carbon_footprint_gha) AS total_carbon_footprint_gha,
+        COUNT(*) AS record_count,
+        MAX(score) AS latest_score
+    FROM TRANSFORMED.FOOTPRINT_DATA
+    GROUP BY country_code, country_name, iso_alpha2, year
+) AS source
+ON target.country_code = source.country_code AND target.year = source.year
+WHEN MATCHED THEN UPDATE SET
+    target.total_carbon_footprint_gha = source.total_carbon_footprint_gha,
+    target.record_count = source.record_count,
+    target.latest_score = source.latest_score,
+    target._updated_at = CURRENT_TIMESTAMP()
+WHEN NOT MATCHED THEN INSERT (
+    country_code, country_name, iso_alpha2, year,
+    total_carbon_footprint_gha, record_count, latest_score
+) VALUES (
+    source.country_code, source.country_name, source.iso_alpha2, source.year,
+    source.total_carbon_footprint_gha, source.record_count, source.latest_score
+);
+```
+
+### 7.4 Enable Tasks
+
+```sql
+ALTER TASK ANALYTICS.UPDATE_FOOTPRINT_SUMMARY_TASK RESUME;
+ALTER TASK TRANSFORMED.PROCESS_FOOTPRINT_DATA_TASK RESUME;
+```
+
+---
+
+## Step 8: Verification
+
+### 8.1 Test File Upload
+
+```bash
+# Upload a test file
+aws s3 cp test_data.json s3://gfn-data-lake/transformed/
+```
+
+### 8.2 Check Snowpipe Status
 
 ```sql
 -- Check pipe status
-SELECT SYSTEM$PIPE_STATUS('GFN.RAW.CARBON_FOOTPRINT_PIPE');
+SELECT SYSTEM$PIPE_STATUS('RAW.FOOTPRINT_DATA_PIPE');
 
--- Check tasks are running
-SHOW TASKS IN SCHEMA GFN.RAW;
-
--- Monitor the dashboard
-SELECT * FROM GFN.MONITORING.V_PIPELINE_DASHBOARD;
+-- Check load history
+SELECT * FROM TABLE(INFORMATION_SCHEMA.COPY_HISTORY(
+    TABLE_NAME => 'FOOTPRINT_DATA_RAW',
+    START_TIME => DATEADD(HOUR, -24, CURRENT_TIMESTAMP())
+));
 ```
 
-## Testing the Pipeline
+### 8.3 Verify Data Flow
 
-1. **Trigger extraction:**
-   ```bash
-   make test-extract
-   ```
+```sql
+-- Check raw data
+SELECT COUNT(*) FROM RAW.FOOTPRINT_DATA_RAW;
 
-2. **Check S3:**
-   ```bash
-   aws s3 ls s3://gfn-data-lake/processed/ --recursive
-   ```
+-- Check transformed data
+SELECT COUNT(*) FROM TRANSFORMED.FOOTPRINT_DATA;
 
-3. **Check Snowflake (after ~1 minute):**
-   ```sql
-   SELECT COUNT(*) FROM GFN.RAW.CARBON_FOOTPRINT_RAW;
-   SELECT COUNT(*) FROM GFN.STAGING.CARBON_FOOTPRINT;
-   ```
+-- Check analytics
+SELECT * FROM ANALYTICS.FOOTPRINT_SUMMARY LIMIT 10;
+```
+
+---
 
 ## Monitoring
 
 ### Snowpipe Load History
+
 ```sql
-SELECT * FROM GFN.MONITORING.V_SNOWPIPE_LOAD_HISTORY;
+SELECT
+    FILE_NAME,
+    STATUS,
+    ROW_COUNT,
+    FIRST_ERROR_MESSAGE,
+    LAST_LOAD_TIME
+FROM TABLE(INFORMATION_SCHEMA.COPY_HISTORY(
+    TABLE_NAME => 'FOOTPRINT_DATA_RAW',
+    START_TIME => DATEADD(DAY, -7, CURRENT_TIMESTAMP())
+))
+ORDER BY LAST_LOAD_TIME DESC;
 ```
 
-### Task Execution History
+### Task History
+
 ```sql
-SELECT * FROM GFN.MONITORING.V_TASK_HISTORY;
+SELECT
+    NAME,
+    STATE,
+    SCHEDULED_TIME,
+    COMPLETED_TIME,
+    ERROR_MESSAGE
+FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
+    SCHEDULED_TIME_RANGE_START => DATEADD(DAY, -1, CURRENT_TIMESTAMP())
+))
+ORDER BY SCHEDULED_TIME DESC;
 ```
 
-### Data Freshness
-```sql
-SELECT * FROM GFN.MONITORING.V_DATA_FRESHNESS;
-```
-
-### Data Quality
-```sql
--- Run quality checks manually
-CALL GFN.MONITORING.RUN_DATA_QUALITY_CHECKS();
-
--- View results
-SELECT * FROM GFN.MONITORING.DATA_QUALITY_METRICS
-ORDER BY check_timestamp DESC
-LIMIT 20;
-```
+---
 
 ## Troubleshooting
 
-### Snowpipe not loading files
+### Snowpipe Not Ingesting
 
 1. Check pipe status:
    ```sql
-   SELECT SYSTEM$PIPE_STATUS('GFN.RAW.CARBON_FOOTPRINT_PIPE');
+   SELECT SYSTEM$PIPE_STATUS('RAW.FOOTPRINT_DATA_PIPE');
    ```
 
-2. Check for errors:
-   ```sql
-   SELECT * FROM TABLE(INFORMATION_SCHEMA.COPY_HISTORY(
-       TABLE_NAME => 'GFN.RAW.CARBON_FOOTPRINT_RAW',
-       START_TIME => DATEADD(hour, -24, CURRENT_TIMESTAMP())
-   )) WHERE error_count > 0;
-   ```
-
-3. Verify S3 notifications:
+2. Verify S3 event notifications:
    ```bash
    aws s3api get-bucket-notification-configuration --bucket gfn-data-lake
    ```
 
-### Tasks not running
-
-1. Check task state:
-   ```sql
-   SHOW TASKS IN SCHEMA GFN.RAW;
+3. Check SNS subscription:
+   ```bash
+   aws sns list-subscriptions-by-topic --topic-arn arn:aws:sns:us-east-1:ACCOUNT_ID:gfn-snowpipe
    ```
 
-2. Resume if suspended:
+### Task Not Running
+
+1. Check task status:
    ```sql
-   ALTER TASK GFN.RAW.PROCESS_CARBON_FOOTPRINT_TASK RESUME;
-   ALTER TASK GFN.RAW.UPDATE_MART_TASK RESUME;
+   SHOW TASKS;
+   ```
+
+2. Verify stream has data:
+   ```sql
+   SELECT SYSTEM$STREAM_HAS_DATA('RAW.FOOTPRINT_DATA_STREAM');
    ```
 
 3. Check task history for errors:
    ```sql
-   SELECT * FROM GFN.MONITORING.V_TASK_HISTORY
-   WHERE error_code IS NOT NULL;
+   SELECT * FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY())
+   WHERE NAME = 'PROCESS_FOOTPRINT_DATA_TASK'
+   ORDER BY SCHEDULED_TIME DESC
+   LIMIT 10;
    ```
+
+### IAM Permission Issues
+
+1. Verify role trust relationship
+2. Check S3 bucket policy
+3. Test with AWS CLI:
+   ```bash
+   aws sts assume-role --role-arn arn:aws:iam::ACCOUNT_ID:role/snowflake-gfn-role \
+     --role-session-name test --external-id EXTERNAL_ID
+   ```
+
+---
 
 ## Cost Optimization
 
-1. **Snowpipe**: Charged per file loaded (~$0.06 per 1000 files)
-2. **Tasks**: Use smallest warehouse that meets SLA
-3. **Streams**: No additional cost
-4. **Alerts**: Minimal cost for monitoring queries
+| Component | Cost Factor | Optimization |
+|-----------|-------------|--------------|
+| Snowpipe | Per-file overhead | Batch files (larger, fewer) |
+| Tasks | Warehouse runtime | Use smallest warehouse |
+| Storage | S3 + Snowflake | Lifecycle policies |
+| Compute | Query execution | Cluster keys, partitioning |
 
-## Security Best Practices
+### Recommended Settings
 
-1. Use dedicated IAM role with least privilege
-2. Enable S3 bucket encryption (SSE-S3 or SSE-KMS)
-3. Use Snowflake network policies to restrict access
-4. Rotate credentials regularly
-5. Enable audit logging in both AWS and Snowflake
+```sql
+-- Use XS warehouse for tasks
+ALTER WAREHOUSE COMPUTE_WH SET WAREHOUSE_SIZE = 'X-SMALL';
+
+-- Auto-suspend after 60 seconds
+ALTER WAREHOUSE COMPUTE_WH SET AUTO_SUSPEND = 60;
+
+-- Enable auto-resume
+ALTER WAREHOUSE COMPUTE_WH SET AUTO_RESUME = TRUE;
+```

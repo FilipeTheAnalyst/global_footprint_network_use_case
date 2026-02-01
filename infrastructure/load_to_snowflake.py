@@ -6,11 +6,11 @@ this script downloads data from LocalStack and uploads it to Snowflake's
 internal stage, then loads it into the target table.
 
 Usage:
-    # Load latest processed file
+    # Load latest transformed file
     uv run python -m infrastructure.load_to_snowflake
     
     # Load specific file
-    uv run python -m infrastructure.load_to_snowflake --file processed/carbon_footprint/2026/01/31/data_015435_processed.json
+    uv run python -m infrastructure.load_to_snowflake --file transformed/gfn_footprint_20260131_030733_transformed.json
 """
 import argparse
 import os
@@ -72,12 +72,12 @@ def get_snowflake_connection():
 
 
 def list_processed_files():
-    """List all processed JSON files in LocalStack S3."""
+    """List all transformed JSON files in LocalStack S3."""
     s3 = get_s3_client()
 
     response = s3.list_objects_v2(
         Bucket=S3_BUCKET,
-        Prefix="processed/carbon_footprint/"
+        Prefix="transformed/"
     )
 
     files = []

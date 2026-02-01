@@ -94,8 +94,8 @@ def setup_s3():
 
     # Create folder structure (placeholder files - LocalStack 3.0 has bug with empty objects)
     folders = [
-        "raw/carbon_footprint/.keep",
-        "processed/carbon_footprint/.keep",
+        "raw/.keep",
+        "transformed/.keep",
         "failed/.keep",
     ]
     for folder in folders:
@@ -593,8 +593,8 @@ def print_summary():
     print(f"""
 Resources Created:
   S3:
-    - s3://{S3_BUCKET}/raw/carbon_footprint/
-    - s3://{S3_BUCKET}/processed/carbon_footprint/
+    - s3://{S3_BUCKET}/raw/
+    - s3://{S3_BUCKET}/transformed/
   
   SQS:
     - {SQS_EXTRACT_QUEUE} (triggers extraction)

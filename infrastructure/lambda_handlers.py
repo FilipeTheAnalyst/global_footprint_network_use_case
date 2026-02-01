@@ -7,10 +7,17 @@ Each function is decoupled and communicates via S3/SQS.
 Uses the efficient bulk API endpoint /data/all/{year} for extraction,
 which returns ALL countries × ALL record types in a single call.
 
+S3 Folder Structure (simplified):
+    s3://gfn-data-lake/
+    ├── raw/                    # Raw extracted data
+    │   └── gfn_footprint_{YYYYMMDD_HHMMSS}.json
+    └── transformed/            # Processed data ready for Snowpipe
+        └── gfn_footprint_{YYYYMMDD_HHMMSS}_transformed.json
+
 Local testing:
     python -m infrastructure.lambda_handlers extract
-    python -m infrastructure.lambda_handlers transform --s3-key raw/footprint/2024/data.json
-    python -m infrastructure.lambda_handlers load --s3-key processed/footprint/2024/data.json
+    python -m infrastructure.lambda_handlers transform --s3-key raw/gfn_footprint_20240130_120000.json
+    python -m infrastructure.lambda_handlers load --s3-key transformed/gfn_footprint_20240130_120000_transformed.json
 """
 from __future__ import annotations
 
@@ -306,10 +313,11 @@ def handler_extract(event: dict, context: Any = None) -> dict:
             "s3_bucket": S3_BUCKET,
         }
 
-    # Save to S3
+    # Save to S3 with simplified folder structure
     s3 = get_s3_client()
     timestamp = datetime.now(timezone.utc)
-    s3_key = f"raw/footprint/{timestamp.strftime('%Y/%m/%d')}/data_{timestamp.strftime('%H%M%S')}.json"
+    # Simplified: raw/{timestamp}.json
+    s3_key = f"raw/gfn_footprint_{timestamp.strftime('%Y%m%d_%H%M%S')}.json"
 
     s3.put_object(
         Bucket=S3_BUCKET,
@@ -374,7 +382,7 @@ def handler_transform(event: dict, context: Any = None) -> dict:
         {
             "status": "success",
             "records_count": 175000,
-            "s3_key": "processed/footprint/2024/01/30/data.json",
+            "s3_key": "transformed/gfn_footprint_20240130_120000_transformed.json",
             "s3_bucket": "gfn-data-lake"
         }
     """
@@ -456,8 +464,9 @@ def handler_transform(event: dict, context: Any = None) -> dict:
         }
     }
 
-    # Save to processed folder
-    output_key = s3_key.replace("raw/", "processed/").replace(".json", "_processed.json")
+    # Save to transformed folder with simplified structure
+    # raw/gfn_footprint_20240130_120000.json -> transformed/gfn_footprint_20240130_120000_transformed.json
+    output_key = s3_key.replace("raw/", "transformed/").replace(".json", "_transformed.json")
 
     s3.put_object(
         Bucket=s3_bucket,
@@ -508,7 +517,7 @@ def handler_load(event: dict, context: Any = None) -> dict:
     Input event (Step Functions or SQS):
         {
             "s3_bucket": "gfn-data-lake",
-            "s3_key": "processed/footprint/2024/01/30/data.json"
+            "s3_key": "transformed/gfn_footprint_20240130_120000_transformed.json"
         }
     
     Output (Step Functions compatible):
@@ -516,7 +525,7 @@ def handler_load(event: dict, context: Any = None) -> dict:
             "status": "success",
             "records_loaded": 175000,
             "destination": "snowflake",
-            "s3_key": "processed/footprint/2024/01/30/data.json"
+            "s3_key": "transformed/20240130_120000.json"
         }
     """
     logger.info(f"Load Lambda triggered: {json.dumps(event)}")

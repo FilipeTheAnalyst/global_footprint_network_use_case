@@ -1,343 +1,183 @@
-# Global Footprint Network Data Pipeline
+# GFN Carbon Footprint Ingestion Pipeline
 
-A production-ready ETL pipeline for extracting, transforming, and loading Global Footprint Network ecological data. Supports two deployment approaches:
+A production-ready data pipeline for extracting carbon footprint data from the Global Footprint Network (GFN) API and loading it into Snowflake.
 
-1. **dlt + DuckDB** - Lightweight, local-first approach using dlt framework
-2. **AWS LocalStack** - Production-like AWS infrastructure simulation with Lambda, Step Functions, and S3
+---
 
-## Table of Contents
+## Features
 
-- [Architecture](#architecture)
-- [Quick Start](#quick-start)
-- [Approach 1: dlt + DuckDB Pipeline](#approach-1-dlt--duckdb-pipeline)
-- [Approach 2: AWS LocalStack Pipeline](#approach-2-aws-localstack-pipeline)
-- [API Efficiency](#api-efficiency)
-- [Configuration](#configuration)
-- [Testing](#testing)
-- [Production Deployment](#production-deployment)
-- [Troubleshooting](#troubleshooting)
+- **dlt + S3 Data Lake Architecture**: Schema evolution, incremental loads, audit trail
+- **Async extraction** with rate limiting and retry logic
+- **Soda data quality checks** on staging layer
+- **Data contracts** for schema validation
+- **Snowpipe integration** for automated S3 → Snowflake loading
+- **Idempotent processing** with deduplication by unique key
+- **Historical backfill** support (1961-2024)
+- **Local development** with LocalStack
 
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                              TWO PIPELINE APPROACHES                             │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                  │
-│  ┌─────────────────────────────┐    ┌─────────────────────────────────────────┐ │
-│  │   APPROACH 1: dlt + DuckDB  │    │   APPROACH 2: AWS LocalStack            │ │
-│  │                             │    │                                          │ │
-│  │   ┌─────────┐               │    │   ┌──────────────────────────────────┐  │ │
-│  │   │ GFN API │               │    │   │     Step Functions Orchestrator  │  │ │
-│  │   └────┬────┘               │    │   └───────────────┬──────────────────┘  │ │
-│  │        ▼                    │    │                   ▼                      │ │
-│  │   ┌─────────┐               │    │   ┌──────────┐   ┌───────────┐   ┌────┐ │ │
-│  │   │   dlt   │               │    │   │ Lambda   │──▶│  Lambda   │──▶│Load│ │ │
-│  │   │ Source  │               │    │   │ Extract  │   │ Transform │   │    │ │ │
-│  │   └────┬────┘               │    │   └────┬─────┘   └─────┬─────┘   └──┬─┘ │ │
-│  │        ▼                    │    │        ▼               ▼            ▼   │ │
-│  │   ┌─────────┐               │    │   ┌────────────────────────────────────┐│ │
-│  │   │ DuckDB  │               │    │   │              S3 Bucket             ││ │
-│  │   │ or      │               │    │   │  raw/ → processed/ → Snowflake    ││ │
-│  │   │Snowflake│               │    │   └────────────────────────────────────┘│ │
-│  │   └─────────┘               │    │                                          │ │
-│  │                             │    │   EventBridge (daily cron)               │ │
-│  │   Best for:                 │    │   SQS (queue triggers)                   │ │
-│  │   - Local development       │    │   SNS (notifications)                    │ │
-│  │   - Quick prototyping       │    │                                          │ │
-│  │   - Small datasets          │    │   Best for:                              │ │
-│  │                             │    │   - Production simulation                │ │
-│  └─────────────────────────────┘    │   - AWS deployment testing               │ │
-│                                      │   - Full infrastructure testing          │ │
-│                                      └─────────────────────────────────────────┘ │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│                              SHARED COMPONENTS                                   │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐   │
-│  │   Dynamic    │    │   Bulk API   │    │    Soda      │    │   GitHub     │   │
-│  │   Type       │    │   Endpoint   │    │   Quality    │    │   Actions    │   │
-│  │   Discovery  │    │   /data/all  │    │   Checks     │    │   CI/CD      │   │
-│  └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────────┘
-```
+---
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.11+
-- Docker & Docker Compose
-- [uv](https://github.com/astral-sh/uv) (Python package manager)
-- GFN API Key (get from [data.footprintnetwork.org](https://data.footprintnetwork.org))
+- [uv](https://docs.astral.sh/uv/) package manager
+- Docker (for LocalStack)
+- GFN API key from [footprintnetwork.org](https://www.footprintnetwork.org/)
 
-### 1. Clone and Install
+### Installation
 
 ```bash
 git clone <repository-url>
 cd global_footprint_network_use_case
 
-# Install dependencies with uv
+# Install dependencies
 make install
-# or manually:
-uv sync
+# or: uv sync
 ```
 
-### 2. Configure Environment
+### Configuration
+
+Create a `.env` file:
 
 ```bash
-# Copy example environment file
-cp .env.example .env
-
-# Edit .env and add your API key
-# Required:
+# GFN API (required)
 GFN_API_KEY=your_api_key_here
 
-# Optional (for Snowflake):
+# AWS (for LocalStack or production)
+AWS_ACCESS_KEY_ID=test
+AWS_SECRET_ACCESS_KEY=test
+AWS_DEFAULT_REGION=us-east-1
+S3_BUCKET=gfn-data-lake
+
+# Snowflake (for production)
 SNOWFLAKE_ACCOUNT=your_account
 SNOWFLAKE_USER=your_user
 SNOWFLAKE_PASSWORD=your_password
-SNOWFLAKE_DATABASE=GFN
+SNOWFLAKE_DATABASE=GFN_PIPELINE
 SNOWFLAKE_WAREHOUSE=COMPUTE_WH
 ```
 
-### 3. Choose Your Approach
-
-**Option A: Quick Local Run (dlt + DuckDB)**
-```bash
-# Extract recent years to local DuckDB
-uv run python -m gfn_pipeline.pipeline_async --start-year 2020 --end-year 2024
-```
-
-**Option B: Full AWS Simulation (LocalStack)**
-```bash
-# Start LocalStack and setup infrastructure
-make setup
-
-# Run the pipeline
-make run-lambda
-```
-
 ---
 
-## Approach 1: dlt + DuckDB Pipeline
+## Usage
 
-The lightweight approach using [dlt](https://dlthub.com/) for data loading and DuckDB for local storage.
+### Pipeline Architecture
 
-### Features
+The pipeline uses a **dlt + S3 Data Lake** architecture:
 
-- **Dynamic Type Discovery**: Record types are discovered from the API, not hardcoded
-- **Bulk API Endpoint**: Uses efficient `/data/all/{year}` endpoint (~66 API calls for 64 years)
-- **Parallel Fetching**: Fetches multiple years concurrently
-- **Incremental Merge**: Supports both full refresh and incremental updates
+```
+Extract (async) → S3 Raw → Soda Checks → S3 Staged → dlt → Destination
+```
 
-### Running the Pipeline
+**Key Features:**
+- **Schema Evolution**: New API fields automatically become columns
+- **Incremental Loads**: dlt tracks state, only processes new/changed data
+- **Data Contracts**: Enforce required fields with `--with-contracts`
+- **Soda Checks**: Data quality validation on staging layer
+- **Audit Trail**: Raw JSON preserved in S3 for replay/debugging
+
+### Basic Commands
 
 ```bash
-# Basic run (2010-2024, DuckDB destination)
-uv run python -m gfn_pipeline.pipeline_async
+# Start LocalStack + setup AWS resources
+make setup
 
-# Full historical extraction (1961-2024)
-uv run python -m gfn_pipeline.pipeline_async --start-year 1961 --end-year 2024
+# Run pipeline (DuckDB destination with S3 storage)
+make run
 
-# Specific year range
-uv run python -m gfn_pipeline.pipeline_async --start-year 2015 --end-year 2020
+# Run pipeline to Snowflake
+make run-snowflake
+
+# Run pipeline to both DuckDB and Snowflake
+make run-both
+
+# Run with Soda data quality checks
+make run-soda
+
+# Run with data contracts
+make run-contracts
+
+# Production run (Snowflake + Soda + contracts)
+make run-production
 
 # Full refresh (replace all data)
-uv run python -m gfn_pipeline.pipeline_async --full-refresh
-
-# Load to Snowflake
-uv run python -m gfn_pipeline.pipeline_async --destination snowflake
-
-# List available record types from API
-uv run python -m gfn_pipeline.pipeline_async --list-types
-
-# Extract specific record types only
-uv run python -m gfn_pipeline.pipeline_async --record-types EFConsTotGHA BiocapTotGHA
+make run-full-refresh
 ```
 
-### Output Schema
+### Direct Extraction (No S3)
 
-The pipeline creates three tables in DuckDB:
-
-| Table | Description | Primary Key |
-|-------|-------------|-------------|
-| `gfn.countries` | Country reference data | `country_code` |
-| `gfn.record_types` | Dynamically discovered record types | `record_type` |
-| `gfn.footprint_data` | All footprint/biocapacity data | `(country_code, year, record_type)` |
-
-### Querying Results
+For quick local development without S3 dependencies:
 
 ```bash
-# Open DuckDB CLI
-uv run duckdb gfn_footprint.duckdb
+# Run dlt pipeline directly to DuckDB
+make run-direct
 
-# Example queries
-SELECT COUNT(*) FROM gfn.footprint_data;
-SELECT DISTINCT record_type FROM gfn.footprint_data;
-SELECT * FROM gfn.countries LIMIT 10;
+# Run dlt pipeline to Snowflake
+make run-direct-snowflake
 ```
 
----
+### Backfill Operations
 
-## Approach 2: AWS LocalStack Pipeline
-
-Production-like AWS infrastructure simulation using LocalStack.
-
-### Features
-
-- **Step Functions Orchestration**: State machine manages ETL workflow
-- **Lambda Functions**: Separate Extract, Transform, Load functions
-- **S3 Data Lake**: Raw and processed data stored in S3
-- **SQS Queues**: Decoupled message-based triggers
-- **EventBridge**: Scheduled daily extraction
-- **SNS Notifications**: Pipeline success/failure alerts
-
-### Docker Setup
-
-#### Step 1: Start LocalStack
+Historical data extraction for any year range (1961-2024):
 
 ```bash
-# Start LocalStack container
-docker-compose up -d localstack
+# Recent years (2020-2024)
+make backfill-recent
 
-# Verify LocalStack is running
-curl http://localhost:4566/_localstack/health
+# Full history (1961-2024)
+make backfill-full
+
+# Custom range
+make backfill YEARS="2010-2020"
 ```
 
-#### Step 2: Setup AWS Infrastructure
+**Performance**:
+- ~66 API calls for full history (bulk endpoint)
+- ~2-3 minutes for complete extraction
+- Idempotent: safe to re-run
+
+### Query Results
 
 ```bash
-# Create all AWS resources (S3, SQS, Lambda, Step Functions, etc.)
-uv run python -m infrastructure.setup_localstack
+# Query DuckDB results
+make duckdb-query
+make duckdb-summary
+make duckdb-top-emitters
+```
 
-# Or use make
+### AWS LocalStack (Production Simulation)
+
+Full AWS stack simulation with Lambda, S3, SQS, and Step Functions:
+
+```bash
+# Start LocalStack + setup AWS resources
 make setup
+
+# Run full Lambda pipeline (Extract → Transform → Load)
+make lambda-invoke-pipeline
+
+# Or run individual Lambda steps
+make lambda-invoke-extract
+make lambda-invoke-transform S3_KEY=raw/gfn_footprint_...json
+make lambda-invoke-load S3_KEY=transformed/gfn_footprint_...json
+
+# Check S3 files
+make aws-s3-ls
+make aws-s3-raw
+make aws-s3-staged
 ```
 
-This creates:
-- S3 bucket: `gfn-data-lake` with `raw/` and `processed/` prefixes
-- SQS queues: `gfn-extract-queue`, `gfn-transform-queue`, `gfn-load-queue`, `gfn-dlq`
-- Lambda functions: `gfn-extract`, `gfn-transform`, `gfn-load`
-- Step Functions: `gfn-pipeline-orchestrator`
-- EventBridge rule: Daily extraction at 6 AM UTC
-- SNS topic: `gfn-pipeline-notifications`
-
-#### Step 3: Run the Pipeline
-
-**Option A: Invoke Lambda Directly**
-```bash
-# Extract data
-uv run awslocal lambda invoke --function-name gfn-extract \
-  --payload '{"start_year": 2020, "end_year": 2024}' output.json
-
-# Check result
-cat output.json
+**S3 Structure**:
 ```
-
-**Option B: Start Step Functions Execution**
-```bash
-# Start state machine execution
-uv run awslocal stepfunctions start-execution \
-  --state-machine-arn arn:aws:states:us-east-1:000000000000:stateMachine:gfn-pipeline-orchestrator \
-  --input '{"start_year": 2020, "end_year": 2024}'
-```
-
-**Option C: Use CLI Handlers**
-```bash
-# Run extract locally (saves to LocalStack S3)
-uv run python -m infrastructure.lambda_handlers extract --start-year 2020 --end-year 2024
-
-# Run transform on extracted data
-uv run python -m infrastructure.lambda_handlers transform --s3-key raw/footprint/2024/01/30/data.json
-
-# Run load
-uv run python -m infrastructure.lambda_handlers load --s3-key processed/footprint/2024/01/30/data_processed.json
-```
-
-#### Step 4: Verify Results
-
-```bash
-# List S3 contents
-uv run awslocal s3 ls s3://gfn-data-lake/ --recursive
-
-# Check SQS queues
-uv run awslocal sqs list-queues
-
-# View Lambda logs
-uv run awslocal logs tail /aws/lambda/gfn-extract --follow
-```
-
-### Full Docker Workflow
-
-```bash
-# Build and run everything in Docker
-make docker-build
-make docker-up
-make docker-setup
-make docker-pipeline
-
-# Or one command
-make docker-all
-```
-
----
-
-## API Efficiency
-
-Both approaches use the efficient bulk API endpoint:
-
-| Approach | API Calls (64 years) | Time |
-|----------|---------------------|------|
-| Per country/type | ~3,000+ | Hours |
-| **Bulk /data/all/{year}** | **~66** | **~2-3 min** |
-
-### Dynamic Type Discovery
-
-Record types are **discovered dynamically** from the API:
-
-```python
-# Types are fetched from:
-# 1. /types endpoint (metadata)
-# 2. /data/all/{year} sample (actual types in data)
-
-# No hardcoded fallback values - if API fails, pipeline fails clearly
-```
-
----
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `GFN_API_KEY` | Yes | - | Global Footprint Network API key |
-| `DUCKDB_PATH` | No | `gfn_footprint.duckdb` | DuckDB database path |
-| `LOCALSTACK_ENDPOINT` | No | `http://localhost:4566` | LocalStack endpoint |
-| `AWS_REGION` | No | `us-east-1` | AWS region |
-| `S3_BUCKET` | No | `gfn-data-lake` | S3 bucket name |
-| `SNOWFLAKE_ACCOUNT` | No | - | Snowflake account identifier |
-| `SNOWFLAKE_USER` | No | - | Snowflake username |
-| `SNOWFLAKE_PASSWORD` | No | - | Snowflake password |
-| `SNOWFLAKE_DATABASE` | No | `GFN` | Snowflake database |
-| `SNOWFLAKE_WAREHOUSE` | No | `COMPUTE_WH` | Snowflake warehouse |
-| `SNOWFLAKE_SCHEMA` | No | `RAW` | Snowflake schema |
-
-### dlt Configuration
-
-dlt configuration is in `.dlt/config.toml` and `.dlt/secrets.toml`:
-
-```toml
-# .dlt/secrets.toml
-[sources.gfn]
-api_key = "your_api_key"
-
-[destination.snowflake.credentials]
-database = "GFN"
-password = "your_password"
-username = "your_user"
-host = "your_account.snowflakecomputing.com"
-warehouse = "COMPUTE_WH"
-role = "ACCOUNTADMIN"
+s3://gfn-data-lake/
+├── raw/                    # Raw API responses (immutable audit trail)
+│   └── gfn_footprint_{timestamp}.json
+├── staged/                 # Validated data ready for dlt
+│   └── gfn_footprint_{timestamp}_staged.json
+└── transformed/            # Legacy: for Snowpipe
+    └── gfn_footprint_{timestamp}_transformed.json
 ```
 
 ---
@@ -347,146 +187,239 @@ role = "ACCOUNTADMIN"
 ### Run All Tests
 
 ```bash
-# Unit tests only
+make test
+```
+
+### Test with Coverage
+
+```bash
+make test-coverage
+```
+
+**Test Categories:**
+- **Unit tests**: Core logic with mocked dependencies (run by default)
+- **Integration tests**: Require LocalStack running (marked with `@pytest.mark.integration`)
+
+```bash
+# Run only unit tests (fast)
 uv run pytest tests/ -v -m "not integration"
 
-# Integration tests (requires LocalStack)
-make setup  # Start LocalStack first
+# Run integration tests (requires LocalStack)
+make setup
 uv run pytest tests/ -v -m integration
-
-# All tests
-uv run pytest tests/ -v
-
-# With coverage
-uv run pytest tests/ -v --cov=src --cov=infrastructure
 ```
 
-### Test Categories
+### Data Quality Checks (Soda)
 
-| Marker | Description | Requirements |
-|--------|-------------|--------------|
-| (none) | Unit tests | None |
-| `@pytest.mark.integration` | LocalStack tests | LocalStack running |
-| `@pytest.mark.asyncio` | Async tests | pytest-asyncio |
-
----
-
-## Production Deployment
-
-### GitHub Actions Workflows
-
-| Workflow | Trigger | Description |
-|----------|---------|-------------|
-| `ci.yml` | PR/push | Linting, type checking, unit tests |
-| `daily-pipeline.yml` | Daily 6 AM UTC | Full pipeline run |
-| `data-quality.yml` | After pipeline | Soda data quality checks |
-
-### Required GitHub Secrets
-
-| Secret | Description |
-|--------|-------------|
-| `GFN_API_KEY` | GFN API key |
-| `SNOWFLAKE_ACCOUNT` | Snowflake account |
-| `SNOWFLAKE_USER` | Snowflake username |
-| `SNOWFLAKE_PASSWORD` | Snowflake password |
-| `SLACK_WEBHOOK_URL` | *(Optional)* Slack alerts |
-
-### Snowflake Setup
+The project includes Soda data quality checks defined in `soda/checks.yml`.
 
 ```bash
-# Setup Snowflake schema and tables
-uv run python -m infrastructure.setup_snowflake_production
+# Run Soda checks against Snowflake
+make soda-check
 ```
 
----
-
-## Troubleshooting
-
-### Common Issues
-
-**1. API Authentication Error (403)**
-```python
-# CORRECT: Empty username, API key as password
-auth = aiohttp.BasicAuth("", api_key)
-
-# WRONG
-auth = aiohttp.BasicAuth("user", api_key)
-```
-
-**2. LocalStack Not Running**
-```bash
-# Check health
-curl http://localhost:4566/_localstack/health
-
-# Restart
-docker-compose down
-docker-compose up -d localstack
-```
-
-**3. DuckDB Version Conflict**
-```bash
-# dlt requires duckdb>=1.1.0,<1.2.0
-uv pip install "duckdb>=1.1.0,<1.2.0"
-```
-
-**4. No Record Types Discovered**
-```bash
-# Test API connectivity
-curl -u ":YOUR_API_KEY" https://api.footprintnetwork.org/v1/types
-
-# List available types
-uv run python -m gfn_pipeline.pipeline_async --list-types
-```
-
-**5. Lambda Timeout**
-```bash
-# Increase timeout in setup_localstack.py
-# Default is 300s (5 min) for extract
-```
-
-### Debug Commands
-
-```bash
-# Check dlt pipeline state
-uv run dlt pipeline gfn_footprint info
-
-# View dlt logs
-cat ~/.dlt/pipelines/gfn_footprint/logs/*
-
-# LocalStack logs
-docker-compose logs -f localstack
-
-# Test API endpoint
-curl -u ":$GFN_API_KEY" "https://api.footprintnetwork.org/v1/data/all/2020" | head
-```
+**Checks include:**
+- Row count validation (expect data for ~184 countries × 28 record types × ~60 years)
+- Data freshness (records loaded within 24 hours)
+- Required columns not null (country_code, country_name, year, record_type)
+- Value range validation (year 1960-2030, value ≥ 0)
+- Record type validation (28 valid types)
+- Duplicate detection (unique country-year-type combinations)
+- Schema validation (required columns present)
 
 ---
 
 ## Project Structure
 
 ```
-├── .github/workflows/        # GitHub Actions CI/CD
-│   ├── ci.yml               # PR/push checks
-│   ├── daily-pipeline.yml   # Scheduled pipeline
-│   └── data-quality.yml     # Soda checks
-├── src/gfn_pipeline/        # Core pipeline code
-│   ├── main.py              # Legacy PipelineRunner
-│   └── pipeline_async.py    # dlt-based async pipeline (MAIN)
-├── infrastructure/          # AWS infrastructure
-│   ├── lambda_handlers.py   # Lambda functions for ETL
-│   ├── setup_localstack.py  # LocalStack setup script
-│   ├── load_to_snowflake.py # Snowflake loader utility
-│   └── snowflake/           # Snowflake SQL scripts
-├── api/                     # FastAPI endpoints
-├── soda/                    # Data quality checks
-├── tests/                   # Unit and integration tests
-├── docker-compose.yml       # LocalStack + services
-├── Makefile                 # Build and run commands
-└── pyproject.toml           # Python dependencies
+global_footprint_network_use_case/
+├── src/gfn_pipeline/           # Core pipeline code
+│   ├── main.py                 # CLI entry point (dlt + S3 + Soda)
+│   └── pipeline_async.py       # Async extraction with dlt (direct mode)
+├── infrastructure/             # AWS infrastructure
+│   ├── lambda_handlers.py      # Lambda functions
+│   ├── setup_localstack.py     # LocalStack setup
+│   └── snowflake/              # Snowflake SQL scripts
+├── tests/                      # Test suite
+├── soda/                       # Data quality checks
+│   ├── configuration.yml       # Soda connection config
+│   └── checks.yml              # Data quality checks
+├── data/                       # Local data storage
+│   ├── raw/                    # Raw extracts
+│   └── transformed/            # Processed data
+├── docs/                       # Documentation
+│   ├── ARCHITECTURE.md         # System architecture
+│   └── SNOWPIPE_SETUP.md       # Snowpipe setup guide
+├── docker-compose.yml          # LocalStack services
+├── Makefile                    # Build commands
+└── pyproject.toml              # Dependencies
+```
+
+---
+
+## Snowflake Integration
+
+### Schema Overview
+
+| Schema | Purpose |
+|--------|---------|
+| `RAW` | Raw JSON data from Snowpipe |
+| `TRANSFORMED` | Structured, deduplicated data |
+| `ANALYTICS` | Aggregated summaries |
+| `MONITORING` | Pipeline health views |
+
+### Data Flow
+
+```
+S3 (transformed/) → Snowpipe → RAW.FOOTPRINT_DATA_RAW
+                                        │
+                                        │ Stream + Task
+                                        ▼
+                              TRANSFORMED.FOOTPRINT_DATA
+                                        │
+                                        │ Task
+                                        ▼
+                              ANALYTICS.FOOTPRINT_SUMMARY
+```
+
+### Setup
+
+See [docs/SNOWPIPE_SETUP.md](docs/SNOWPIPE_SETUP.md) for detailed Snowflake setup instructions.
+
+---
+
+## API Reference
+
+### GFN API Authentication
+
+```python
+# Empty username, API key as password
+import aiohttp
+auth = aiohttp.BasicAuth("", api_key)
+```
+
+### Bulk Endpoint (Recommended)
+
+```
+GET https://api.footprintnetwork.org/v1/data/all/{year}
+```
+
+Returns all countries and record types for a given year (~200 records per call).
+
+### Response Format
+
+```json
+{
+  "countryCode": 238,
+  "countryName": "Ethiopia",
+  "isoa2": "ET",
+  "year": 2010,
+  "value": 5760020.03,
+  "record": "CarbonBC"
+}
+```
+
+---
+
+## Makefile Commands
+
+| Command | Description |
+|---------|-------------|
+| `make install` | Install dependencies |
+| `make setup` | Start LocalStack and create resources |
+| `make run` | Run pipeline (DuckDB + S3 + dlt) |
+| `make run-snowflake` | Run pipeline (Snowflake destination) |
+| `make run-both` | Run pipeline (DuckDB + Snowflake) |
+| `make run-soda` | Run pipeline with Soda checks |
+| `make run-contracts` | Run pipeline with data contracts |
+| `make run-production` | Production: Snowflake + Soda + contracts |
+| `make run-direct` | Run dlt directly (no S3) |
+| `make backfill-recent` | Backfill 2020-2024 |
+| `make backfill-full` | Backfill 1961-2024 |
+| `make backfill YEARS=...` | Custom year range backfill |
+| `make lambda-invoke-pipeline` | Run full Lambda ETL pipeline |
+| `make lambda-invoke-extract` | Run extract Lambda only |
+| `make test` | Run all tests |
+| `make test-coverage` | Run tests with coverage |
+| `make soda-check` | Run data quality checks |
+| `make duckdb-query` | Query DuckDB results |
+| `make duckdb-summary` | Show DuckDB summary stats |
+| `make aws-s3-ls` | List S3 bucket contents |
+| `make clean` | Clean generated files |
+| `make docker-down` | Stop LocalStack |
+
+---
+
+## Troubleshooting
+
+### API Authentication Errors
+
+```
+401 Unauthorized
+```
+
+**Solution**: Verify API key format. The GFN API uses Basic Auth with empty username:
+```bash
+curl -u ":YOUR_API_KEY" https://api.footprintnetwork.org/v1/data/all/2023
+```
+
+### LocalStack Connection Issues
+
+```
+Could not connect to LocalStack
+```
+
+**Solution**:
+```bash
+# Check LocalStack status
+docker-compose ps
+
+# Restart LocalStack
+make docker-down && make setup
+```
+
+### Rate Limiting
+
+```
+429 Too Many Requests
+```
+
+**Solution**: The pipeline has built-in rate limiting (8 concurrent requests). If issues persist, reduce concurrency in `pipeline_async.py`.
+
+### Snowpipe Not Loading
+
+**Solution**: Check Snowpipe status:
+```sql
+SELECT SYSTEM$PIPE_STATUS('RAW.FOOTPRINT_DATA_PIPE');
+```
+
+See [docs/SNOWPIPE_SETUP.md](docs/SNOWPIPE_SETUP.md) for troubleshooting.
+
+---
+
+## Architecture
+
+For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+### High-Level Overview
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   TRIGGER   │────▶│   EXTRACT   │────▶│  TRANSFORM  │────▶│    LOAD     │
+│             │     │             │     │             │     │             │
+│ EventBridge │     │   Lambda    │     │   Lambda    │     │  Snowpipe   │
+│ API Gateway │     │   + SQS     │     │   + SQS     │     │  + Tasks    │
+└─────────────┘     └──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+                           │                   │                   │
+                           ▼                   ▼                   ▼
+                    ┌─────────────────────────────────────────────────────┐
+                    │                    S3 DATA LAKE                      │
+                    │         raw/ ────────▶ transformed/ ────▶ Snowflake │
+                    └─────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## License
 
-MIT
+MIT License

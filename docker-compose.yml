@@ -7,6 +7,13 @@
 #   - pipeline: Main pipeline container (DuckDB/Snowflake)
 #   - duckdb-ui: Optional DuckDB web interface
 #
+# S3 Structure (simplified):
+#   s3://gfn-data-lake/
+#   ├── raw/                    # Raw extracted data
+#   │   └── gfn_footprint_{YYYYMMDD_HHMMSS}.json
+#   └── transformed/            # Processed data ready for Snowpipe
+#       └── gfn_footprint_{YYYYMMDD_HHMMSS}_transformed.json
+#
 # Usage:
 #   make docker-up              # Start LocalStack
 #   make docker-pipeline        # Run pipeline in container
@@ -45,6 +52,7 @@ services:
   # GFN Pipeline Container
   # ===========================================================================
   # Main pipeline that can run with DuckDB (local) or Snowflake (production)
+  # Supports both dlt+DuckDB approach and AWS Lambda approach
   pipeline:
     build:
       context: .
@@ -74,6 +82,10 @@ services:
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_REGION=us-east-1
       - S3_BUCKET=gfn-data-lake
+      
+      # Backfill Configuration (optional)
+      - START_YEAR=${START_YEAR:-2020}
+      - END_YEAR=${END_YEAR:-2024}
     volumes:
       - "./data:/data"
       - "./logs:/app/logs"
@@ -84,6 +96,35 @@ services:
       - gfn-network
     profiles:
       - pipeline
+
+  # ===========================================================================
+  # Lambda Pipeline Runner (Alternative approach using Lambda handlers)
+  # ===========================================================================
+  lambda-pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gfn-lambda-pipeline
+    entrypoint: ["python", "-m", "infrastructure.lambda_handlers"]
+    command: ["extract", "--start-year", "${START_YEAR:-2020}", "--end-year", "${END_YEAR:-2024}"]
+    environment:
+      - GFN_API_KEY=${GFN_API_KEY}
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_REGION=us-east-1
+      - S3_BUCKET=gfn-data-lake
+      - DUCKDB_PATH=/data/gfn_lambda.duckdb
+    volumes:
+      - "./data:/data"
+      - "./logs:/app/logs"
+    depends_on:
+      localstack:
+        condition: service_healthy
+    networks:
+      - gfn-network
+    profiles:
+      - lambda
 
   # ===========================================================================
   # DuckDB Web UI (Optional)
