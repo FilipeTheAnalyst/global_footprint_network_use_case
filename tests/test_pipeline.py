@@ -13,6 +13,142 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 
 # ============================================================================
+# Unit Tests - Soda Staging Validators (validators.py)
+# ============================================================================
+
+class TestSodaStagingValidator:
+    """Tests for Soda staging layer validation."""
+
+    def test_validator_loads_checks_from_yaml(self):
+        """Test that validator loads checks from YAML file."""
+        from gfn_pipeline.validators import SodaStagingValidator
+        
+        validator = SodaStagingValidator()
+        
+        assert "footprint_data" in validator.checks
+        assert "countries" in validator.checks
+        assert "required_columns" in validator.checks["footprint_data"]
+
+    def test_validator_validates_footprint_data(self):
+        """Test footprint_data validation passes with valid data."""
+        from gfn_pipeline.validators import SodaStagingValidator
+        
+        validator = SodaStagingValidator(fail_on_error=False)
+        
+        data = {
+            "footprint_data": [
+                {"country_code": 1, "country_name": "Test", "year": 2020, "record_type": "EFConsTotGHA", "value": 100.0},
+                {"country_code": 2, "country_name": "Test2", "year": 2020, "record_type": "BiocapTotGHA", "value": 200.0},
+            ],
+            "countries": [
+                {"country_code": 1, "country_name": "Test"},
+                {"country_code": 2, "country_name": "Test2"},
+            ],
+        }
+        
+        result = validator.validate(data)
+        
+        assert result.passed
+        assert result.checks_failed == 0
+
+    def test_validator_fails_on_missing_required_columns(self):
+        """Test validation fails when required columns are missing."""
+        from gfn_pipeline.validators import SodaStagingValidator
+        
+        validator = SodaStagingValidator(fail_on_error=False)
+        
+        data = {
+            "footprint_data": [
+                {"country_code": 1, "year": 2020, "record_type": "EF"},  # Missing country_name
+            ],
+            "countries": [],
+        }
+        
+        result = validator.validate(data)
+        
+        assert not result.passed
+        assert result.checks_failed > 0
+        assert any("country_name" in check for check in result.failed_checks)
+
+    def test_validator_fails_on_invalid_year_range(self):
+        """Test validation fails when year is outside valid range."""
+        from gfn_pipeline.validators import SodaStagingValidator
+        
+        validator = SodaStagingValidator(fail_on_error=False)
+        
+        data = {
+            "footprint_data": [
+                {"country_code": 1, "country_name": "Test", "year": 1800, "record_type": "EF"},  # Invalid year
+            ],
+            "countries": [],
+        }
+        
+        result = validator.validate(data)
+        
+        assert not result.passed
+        assert any("year" in check for check in result.failed_checks)
+
+    def test_validator_warns_on_unknown_record_types(self):
+        """Test validation warns (not fails) on unknown record types."""
+        from gfn_pipeline.validators import SodaStagingValidator
+        
+        validator = SodaStagingValidator(fail_on_error=False)
+        
+        data = {
+            "footprint_data": [
+                {"country_code": 1, "country_name": "Test", "year": 2020, "record_type": "UnknownType", "value": 100.0},
+            ],
+            "countries": [
+                {"country_code": 1, "country_name": "Test"},  # Need at least one country
+            ],
+        }
+        
+        result = validator.validate(data)
+        
+        # Should pass (warning only) but have warnings
+        assert result.passed
+        assert result.checks_warned > 0
+        assert any("unknown types" in warning for warning in result.warnings)
+
+    def test_validator_fails_on_duplicates(self):
+        """Test validation fails on duplicate records."""
+        from gfn_pipeline.validators import SodaStagingValidator
+        
+        validator = SodaStagingValidator(fail_on_error=False)
+        
+        data = {
+            "footprint_data": [
+                {"country_code": 1, "country_name": "Test", "year": 2020, "record_type": "EFConsTotGHA", "value": 100.0},
+                {"country_code": 1, "country_name": "Test", "year": 2020, "record_type": "EFConsTotGHA", "value": 200.0},  # Duplicate
+            ],
+            "countries": [],
+        }
+        
+        result = validator.validate(data)
+        
+        assert not result.passed
+        assert any("duplicate" in check.lower() for check in result.failed_checks)
+
+    def test_validator_result_to_dict(self):
+        """Test SodaCheckResult can be serialized to dict."""
+        from gfn_pipeline.validators import SodaCheckResult
+        
+        result = SodaCheckResult(
+            passed=True,
+            checks_run=10,
+            checks_passed=9,
+            checks_failed=1,
+            failed_checks=["test failure"],
+        )
+        
+        result_dict = result.to_dict()
+        
+        assert result_dict["passed"] is True
+        assert result_dict["checks_run"] == 10
+        assert result_dict["failed_checks"] == ["test failure"]
+
+
+# ============================================================================
 # Unit Tests - dlt+DuckDB Pipeline (pipeline_async.py)
 # ============================================================================
 
@@ -653,6 +789,7 @@ class TestLocalStackIntegration:
             endpoint_url="http://localhost:4566",
             aws_access_key_id="test",
             aws_secret_access_key="test",
+            region_name="us-east-1",
         )
 
         buckets = s3.list_buckets()["Buckets"]
@@ -669,6 +806,7 @@ class TestLocalStackIntegration:
             endpoint_url="http://localhost:4566",
             aws_access_key_id="test",
             aws_secret_access_key="test",
+            region_name="us-east-1",
         )
 
         queues = sqs.list_queues()
@@ -735,6 +873,12 @@ class TestEndToEndExtraction:
         # Check API key
         if not os.getenv("GFN_API_KEY"):
             pytest.skip("GFN_API_KEY not set")
+
+    @pytest.fixture(autouse=True)
+    def force_duckdb_destination(self, monkeypatch):
+        """Force DuckDB destination by unsetting Snowflake env vars for tests."""
+        monkeypatch.delenv("SNOWFLAKE_ACCOUNT", raising=False)
+        monkeypatch.delenv("AWS_LAMBDA_FUNCTION_NAME", raising=False)
 
     def test_extract_single_year(self):
         """Test extracting a single year of data."""

@@ -19,6 +19,7 @@ dependencies = [
   "uvicorn[standard]>=0.24.0",
   "pydantic>=2.5.0",
   "pydantic-settings>=2.1.0",
+  "pyyaml>=6.0.0",
   "soda-core-snowflake>=3.0.0",
   "awscli-local>=0.22",
 ]

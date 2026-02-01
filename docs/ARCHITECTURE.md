@@ -245,7 +245,46 @@ s3://gfn-data-lake/
 
 ## Soda Data Quality Checks
 
-### Check Definitions
+### Two-Tier Validation Architecture
+
+The pipeline uses a **two-tier validation** approach:
+
+| Tier | File | When | Purpose |
+|------|------|------|---------|
+| **Staging (Pre-load)** | `soda/staging_checks.yml` | Before loading to destination | Validate data in Python before dlt load |
+| **Post-load** | `soda/checks.yml` | After loading to Snowflake | Validate data in Snowflake tables |
+
+```
+Extract → S3 Raw → [Staging Checks] → S3 Staged → dlt → Snowflake → [Post-load Checks]
+                         │                                                │
+                   staging_checks.yml                               checks.yml
+                   (Python validator)                              (Soda Core)
+```
+
+### Staging Checks (Pre-load)
+
+Defined in `soda/staging_checks.yml`, executed by `src/gfn_pipeline/validators.py`:
+
+```yaml
+# soda/staging_checks.yml
+footprint_data:
+  row_count: {min: 1}
+  required_columns: [country_code, country_name, year, record_type]
+  valid_year_range: {min: 1960, max: 2030}
+  valid_record_types: [EFConsTotGHA, BiocapTotGHA, ...]
+  non_negative_value: true
+  unique_key: [country_code, year, record_type]
+
+countries:
+  row_count: {min: 1}
+  required_columns: [country_code, country_name]
+  unique_key: [country_code]
+  min_country_coverage: 150
+```
+
+### Post-load Checks (Snowflake)
+
+Defined in `soda/checks.yml`, executed via `make run-soda`:
 
 | Table | Check | Rule |
 |-------|-------|------|
@@ -361,6 +400,11 @@ make run-production
 make backfill-recent          # 2020-2024
 make backfill-full            # 1961-2024
 make backfill YEARS=2010-2015 # Custom range
+
+# Testing (all tests ~7s)
+make test                     # All tests
+make test-unit                # Unit tests only (no LocalStack)
+make test-integration         # Integration tests (requires LocalStack)
 ```
 
 LocalStack provides:
@@ -379,6 +423,7 @@ global_footprint_network_use_case/
 ├── src/gfn_pipeline/                    # Core pipeline package
 │   ├── __init__.py                      # Exports: run_pipeline, gfn_source
 │   ├── main.py                          # ✓ RECOMMENDED: dlt + S3 + Soda
+│   ├── validators.py                    # Soda staging validators (loads YAML)
 │   └── pipeline_async.py                # Async extraction with dlt (direct mode)
 │
 ├── infrastructure/                      # AWS infrastructure
@@ -391,8 +436,10 @@ global_footprint_network_use_case/
 ├── tests/                               # Test suite
 │   └── test_pipeline.py                 # Unit and integration tests
 │
-├── soda/                                # Data quality
-│   └── checks.yml                       # Soda check definitions
+├── soda/                                # Data quality (two-tier validation)
+│   ├── configuration.yml                # Soda Snowflake connection config
+│   ├── staging_checks.yml               # PRE-LOAD: Staging layer validation
+│   └── checks.yml                       # POST-LOAD: Snowflake table validation
 │
 ├── docs/                                # Documentation
 │   ├── ARCHITECTURE.md                  # This file

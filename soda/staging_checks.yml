@@ -1,0 +1,117 @@
+# Soda-style Data Quality Checks for Staging Layer
+# These checks run BEFORE loading to destination (DuckDB/Snowflake)
+# https://docs.soda.io/soda-cl/soda-cl-overview.html
+#
+# Purpose: Catch data quality issues early, before they reach the warehouse
+# Scope: Validates transformed data in memory/S3 staging area
+
+# =============================================================================
+# FOOTPRINT DATA CHECKS
+# =============================================================================
+
+footprint_data:
+  # Row count - ensure we have data
+  row_count:
+    min: 1
+    description: "At least one record must be present"
+
+  # Required columns - these cannot be null
+  required_columns:
+    - country_code
+    - country_name
+    - year
+    - record_type
+
+  # Year range validation
+  valid_year_range:
+    min: 1960
+    max: 2030
+    description: "GFN data spans 1961-present"
+
+  # Valid record types from GFN API
+  # Updated based on actual API responses
+  valid_record_types:
+    # Ecological Footprint - Total (Global Hectares)
+    - EFConsTotGHA      # Consumption
+    - EFProdTotGHA      # Production
+    - EFImportsTotGHA   # Imports
+    - EFExportsTotGHA   # Exports
+    # Ecological Footprint - Per Capita
+    - EFConsPerCap
+    - EFProdPerCap
+    - EFImportsPerCap
+    - EFExportsPerCap
+    # Biocapacity
+    - BiocapTotGHA
+    - BiocapPerCap
+    # Area
+    - AreaTotHA
+    - AreaPerCap
+    # Economic & Social Indicators
+    - Population
+    - GDP-PPP
+    - GDP-USD
+    - HDI
+    # Derived metrics
+    - Earths
+    # Legacy record types (backward compatibility)
+    - EFCtot
+    - EFCcrop
+    - EFCgraz
+    - EFCfrst
+    - EFCfish
+    - EFCbult
+    - EFCcarb
+    - BioCaptot
+    - BioCapcrop
+    - BioCapgraz
+    - BioCapfrst
+    - BioCapfish
+    - BioCapbult
+    - EFCtotPerCap
+    - EFCcropPerCap
+    - EFCgrazPerCap
+    - EFCfrstPerCap
+    - EFCfishPerCap
+    - EFCbultPerCap
+    - EFCcarbPerCap
+    - BioCaptotPerCap
+    - BioCapcropPerCap
+    - BioCapgrazPerCap
+    - BioCapfrstPerCap
+    - BioCapfishPerCap
+    - BioCapbultPerCap
+
+  # Value validation
+  non_negative_value: true
+  description_value: "Ecological footprint values must be non-negative"
+
+  # Unique key constraint
+  unique_key:
+    - country_code
+    - year
+    - record_type
+  description_unique: "One record per country/year/record_type combination"
+
+# =============================================================================
+# COUNTRIES REFERENCE DATA CHECKS
+# =============================================================================
+
+countries:
+  # Row count
+  row_count:
+    min: 1
+    description: "At least one country must be present"
+
+  # Required columns
+  required_columns:
+    - country_code
+    - country_name
+
+  # Unique key
+  unique_key:
+    - country_code
+
+  # Coverage check
+  min_country_coverage: 150
+  description_coverage: "Expect data for at least 150 countries (warn if less)"

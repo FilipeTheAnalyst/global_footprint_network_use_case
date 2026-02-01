@@ -1,5 +1,11 @@
-# Soda Data Quality Checks for GFN Pipeline
+# Soda Data Quality Checks for Snowflake (Post-Load Validation)
 # https://docs.soda.io/soda-cl/soda-cl-overview.html
+#
+# Purpose: Validate data AFTER loading to Snowflake warehouse
+# Scope: Production data quality monitoring
+# Usage: soda scan -d snowflake -c soda/configuration.yml soda/checks.yml
+#
+# Note: For staging layer checks (before loading), see soda/staging_checks.yml
 
 # =============================================================================
 # RAW TABLE CHECKS - GFN Footprint Data

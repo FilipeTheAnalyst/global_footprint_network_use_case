@@ -185,16 +185,15 @@ s3://gfn-data-lake/
 
 ## Testing
 
-### Run All Tests
-
 ```bash
+# Run all tests (~7s)
 make test
-```
 
-### Test with Coverage
+# Unit tests only (no LocalStack required)
+make test-unit
 
-```bash
-make test-coverage
+# Integration tests only (requires LocalStack)
+make test-integration
 ```
 
 **Test Categories:**
@@ -212,7 +211,10 @@ uv run pytest tests/ -v -m integration
 
 ### Data Quality Checks (Soda)
 
-The project includes Soda data quality checks defined in `soda/checks.yml`.
+The project uses a **two-tier validation** approach with Soda:
+
+1. **Staging Validation** (pre-load): Python-based checks defined in `soda/staging_checks.yml`
+2. **Post-load Validation**: Soda Core checks against Snowflake defined in `soda/checks.yml`
 
 ```bash
 # Run Soda checks against Snowflake
@@ -236,15 +238,18 @@ make soda-check
 global_footprint_network_use_case/
 ├── src/gfn_pipeline/           # Core pipeline code
 │   ├── main.py                 # CLI entry point (dlt + S3 + Soda)
+│   ├── validators.py           # Soda staging validators (loads YAML)
 │   └── pipeline_async.py       # Async extraction with dlt (direct mode)
 ├── infrastructure/             # AWS infrastructure
 │   ├── lambda_handlers.py      # Lambda functions
 │   ├── setup_localstack.py     # LocalStack setup
 │   └── snowflake/              # Snowflake SQL scripts
 ├── tests/                      # Test suite
+│   └── test_pipeline.py        # Unit + integration tests
 ├── soda/                       # Data quality checks
-│   ├── configuration.yml       # Soda connection config
-│   └── checks.yml              # Data quality checks
+│   ├── configuration.yml       # Soda Snowflake connection config
+│   ├── staging_checks.yml      # PRE-LOAD: Staging layer validation (YAML)
+│   └── checks.yml              # POST-LOAD: Snowflake table validation
 ├── data/                       # Local data storage
 │   ├── raw/                    # Raw extracts
 │   └── transformed/            # Processed data

@@ -79,7 +79,11 @@ help:
 	@echo "║                                                                               ║"
 	@echo "║  DEVELOPMENT                                                                  ║"
 	@echo "║  ──────────────────────────────────────────────────────────────────────────── ║"
-	@echo "║    make test                   Run tests                                      ║"
+	@echo "║    make test                   Run all tests (~7s)                            ║"
+	@echo "║    make test-unit              Run unit tests only (no LocalStack)            ║"
+	@echo "║    make test-integration       Run integration tests (requires LocalStack)    ║"
+	@echo "║    make lint                   Run linter                                     ║"
+	@echo "║    make format                 Format code                                    ║"
 	@echo "║    make clean                  Clean generated files                          ║"
 	@echo "║    make logs                   View pipeline logs                             ║"
 	@echo "║                                                                               ║"
@@ -425,8 +429,11 @@ print(conn.execute('SELECT country_name, year, ROUND(value/1e6, 2) as value_mill
 test:
 	uv run pytest tests/ -v
 
-test-coverage:
-	uv run pytest tests/ -v --cov=src --cov-report=html
+test-unit:
+	uv run pytest tests/ -v -m "not integration"
+
+test-integration:
+	uv run pytest tests/ -v -m "integration"
 
 lint:
 	uv run ruff check src/ infrastructure/
