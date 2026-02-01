@@ -89,7 +89,7 @@ jobs:
         ports:
           - 4566:4566
         env:
-          SERVICES: s3,lambda,sqs,sns,events,stepfunctions
+          SERVICES: s3,lambda,sqs,sns,events,stepfunctions,logs
           DEFAULT_REGION: us-east-1
           DOCKER_HOST: unix:///var/run/docker.sock
         options: >-
