@@ -1,33 +1,34 @@
 # Architecture Documentation
 
-Detailed technical architecture for the GFN Carbon Footprint Ingestion Pipeline.
+## Overview
+
+This project implements a **dual-architecture approach** for the Global Footprint Network data pipeline:
+
+| Environment | Data Loading | Orchestration | Database | Purpose |
+|-------------|--------------|---------------|----------|---------|
+| **Production** | Snowpipe | AWS Step Functions + Lambda | Snowflake | Scalable, event-driven, enterprise-grade |
+| **Local Development** | dlt (data load tool) | Python scripts | DuckDB | Rapid iteration, testing, flexibility |
+
+This separation allows for:
+- **Production reliability** with managed services and automatic scaling
+- **Development agility** with fast feedback loops and local testing
+- **Technology showcase** demonstrating proficiency in multiple approaches
 
 ---
 
-## Pipeline Approaches
+## Production Architecture
 
-This project supports two pipeline architectures:
-
-| Approach | Entry Point | Best For | Features |
-|----------|-------------|----------|----------|
-| **AWS + dlt** (Recommended) | `main.py` + Lambda | Production | AWS orchestration, dlt loading, schema evolution, Soda checks |
-| dlt Direct | `pipeline_async.py` | Quick local testing | Fast iteration, no AWS dependencies |
-
----
-
-## Recommended Architecture: AWS Orchestration + dlt Loading
-
-The production architecture combines **AWS services for orchestration** with **dlt for data loading**:
+### AWS Orchestration + Snowpipe Loading
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                         AWS ORCHESTRATION + dlt LOADING                              │
+│                       AWS ORCHESTRATION + SNOWPIPE LOADING                           │
 ├─────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                      │
 │   EventBridge          Step Functions              Lambda Functions                  │
 │   ───────────          ───────────────             ─────────────────                 │
-│   Daily Schedule  ───▶  State Machine  ───▶  Extract ───▶ Transform ───▶ Load       │
-│   (cron)               (orchestration)       (API→S3)    (validate)    (dlt→SF)     │
+│   Daily Schedule  ───▶  State Machine  ───▶  Extract ───▶ Transform ───▶ Notify     │
+│   (cron)               (orchestration)       (API→S3)    (validate)    (SNS→SQS)    │
 │                              │                                                       │
 │                              ▼                                                       │
 │                         SQS + DLQ                                                    │
@@ -35,190 +36,344 @@ The production architecture combines **AWS services for orchestration** with **d
 │                                                                                      │
 │   ┌─────────────────────────────────────────────────────────────────────────────┐   │
 │   │                           S3 DATA LAKE                                       │   │
-│   │     raw/                    staged/                     (audit trail)        │   │
+│   │     raw/                    transformed/                (audit trail)        │   │
 │   │     └── immutable  ───▶     └── validated  ───▶         replay capability    │   │
 │   └─────────────────────────────────────────────────────────────────────────────┘   │
 │                                      │                                               │
 │                                      ▼                                               │
 │                              ┌──────────────┐                                        │
-│                              │     dlt      │                                        │
-│                              │  • Schema    │                                        │
-│                              │    Evolution │                                        │
-│                              │  • Merge     │                                        │
-│                              │  • State     │                                        │
+│                              │   Snowpipe   │                                        │
+│                              │  • Auto-     │                                        │
+│                              │    ingest    │                                        │
+│                              │  • Event-    │                                        │
+│                              │    driven    │                                        │
 │                              └──────┬───────┘                                        │
 │                                     │                                                │
-│                         ┌───────────┴───────────┐                                    │
-│                         ▼                       ▼                                    │
-│                   ┌──────────┐            ┌──────────┐                               │
-│                   │ Snowflake│            │  DuckDB  │                               │
-│                   │  (prod)  │            │  (dev)   │                               │
-│                   └──────────┘            └──────────┘                               │
+│                                     ▼                                                │
+│                              ┌──────────────┐                                        │
+│                              │  Snowflake   │                                        │
+│                              │  RAW → TRANSFORMED                                    │
+│                              │  (Stream + Task)                                      │
+│                              └──────────────┘                                        │
 │                                                                                      │
 └─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Why This Architecture?
+### Component Details
 
-| Component | Purpose | Why Not Alternatives |
-|-----------|---------|---------------------|
-| **EventBridge** | Scheduling | Native AWS, cron expressions, no servers |
-| **Step Functions** | Orchestration | Visual workflow, built-in retry, state tracking |
-| **Lambda** | Compute | Serverless, pay-per-use, auto-scaling |
-| **SQS** | Queuing | Decoupling, retry logic, dead letter queue |
-| **S3** | Storage | Durability, audit trail, replay capability |
-| **dlt** | Loading | Schema evolution, incremental loads, multi-destination |
-| **CloudFormation** | IaC | Native AWS, version controlled infrastructure |
+#### EventBridge Scheduler
+- **Purpose**: Trigger daily pipeline execution
+- **Schedule**: `cron(0 6 * * ? *)` - Daily at 6 AM UTC
+- **Target**: Step Functions state machine
+
+#### Step Functions State Machine
+- **Purpose**: Orchestrate multi-step ETL workflow
+- **Features**:
+  - Visual workflow monitoring
+  - Built-in retry logic with exponential backoff
+  - Parallel execution support
+  - Error handling with catch blocks
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    STEP FUNCTIONS STATE MACHINE                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│   ┌──────────┐     ┌───────────┐     ┌──────────┐     ┌──────────┐     │
+│   │  Start   │────▶│  Extract  │────▶│Transform │────▶│  Notify  │     │
+│   └──────────┘     │  Lambda   │     │  Lambda  │     │   SNS    │     │
+│                    └─────┬─────┘     └────┬─────┘     └────┬─────┘     │
+│                          │                │                │           │
+│                          ▼                ▼                ▼           │
+│                    ┌──────────┐     ┌──────────┐     ┌──────────┐     │
+│                    │  Retry   │     │  Retry   │     │   DLQ    │     │
+│                    │  (3x)    │     │  (3x)    │     │  (fail)  │     │
+│                    └──────────┘     └──────────┘     └──────────┘     │
+│                                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Lambda Functions
+
+| Function | Purpose | Input | Output |
+|----------|---------|-------|--------|
+| `extract` | Fetch data from GFN API | API endpoint | S3 raw/ |
+| `transform` | Validate and transform data | S3 raw/ | S3 transformed/ |
+| `notify` | Send completion notification | Transform result | SNS topic |
+
+#### Snowpipe (Continuous Data Loading)
+
+**Why Snowpipe over dlt for Production:**
+
+| Aspect | Snowpipe | dlt |
+|--------|----------|-----|
+| **Latency** | Near real-time (seconds) | Batch-oriented |
+| **Scalability** | Auto-scales with Snowflake | Limited by compute |
+| **Cost** | Pay per file loaded | Compute costs |
+| **Maintenance** | Fully managed | Requires runtime |
+| **Integration** | Native S3 events | Requires orchestration |
+
+**Snowpipe Configuration:**
+```sql
+-- Auto-ingest from S3 transformed/ bucket
+CREATE PIPE gfn_pipe
+  AUTO_INGEST = TRUE
+  AS COPY INTO raw.ecological_footprint
+  FROM @gfn_stage/transformed/
+  FILE_FORMAT = (TYPE = 'PARQUET');
+```
+
+See [SNOWPIPE_SETUP.md](./SNOWPIPE_SETUP.md) for complete setup instructions.
 
 ---
 
-## Why dlt Instead of Snowpipe?
+## Local Development Architecture
 
-We chose **dlt for loading** over Snowpipe for several reasons:
-
-| Aspect | dlt | Snowpipe |
-|--------|-----|----------|
-| **Schema Evolution** | ✅ Automatic | ❌ Manual ALTER TABLE |
-| **Multi-Destination** | ✅ DuckDB + Snowflake | ❌ Snowflake only |
-| **Incremental Loads** | ✅ Built-in state tracking | ❌ Requires custom logic |
-| **Data Contracts** | ✅ Native support | ❌ Not available |
-| **Local Development** | ✅ Same code, DuckDB | ❌ Requires Snowflake |
-| **Merge/Upsert** | ✅ Declarative | ⚠️ Requires Stream + Task |
-| **Batch Processing** | ✅ Optimized | ⚠️ Per-file overhead |
-
-**When to use Snowpipe instead:**
-- Real-time/streaming requirements (sub-minute latency)
-- Very high volume continuous ingestion
-- Native Snowflake-only deployments
-
-> 📘 **Note**: For Snowpipe setup instructions, see [SNOWPIPE_SETUP.md](SNOWPIPE_SETUP.md). This can be used to evolve the architecture into a streaming batch service if real-time requirements emerge.
-
----
-
-## Data Flow Detail
-
-### Phase 1: Extract (Lambda)
+### dlt + DuckDB Stack
 
 ```
-GFN API ──────▶ Extract Lambda ──────▶ S3 raw/
-                    │
-                    ├── Async HTTP (aiohttp)
-                    ├── Rate limiting (8 concurrent)
-                    ├── Exponential backoff retry
-                    └── Bulk endpoint (~66 API calls for 64 years)
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                         LOCAL DEVELOPMENT ARCHITECTURE                               │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│   ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐  │
+│   │   GFN API    │────▶│     dlt      │────▶│   DuckDB     │────▶│    Soda      │  │
+│   │   (source)   │     │  (extract/   │     │   (local     │     │   (quality   │  │
+│   │              │     │   load)      │     │    warehouse)│     │    checks)   │  │
+│   └──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘  │
+│                              │                                                       │
+│                              ▼                                                       │
+│                    ┌─────────────────────┐                                          │
+│                    │   dlt Features      │                                          │
+│                    │   • Schema evolution│                                          │
+│                    │   • Data contracts  │                                          │
+│                    │   • Incremental     │                                          │
+│                    │   • Multi-dest      │                                          │
+│                    └─────────────────────┘                                          │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Phase 2: Transform (Lambda)
+### Why dlt for Local Development
 
-```
-S3 raw/ ──────▶ Transform Lambda ──────▶ Soda Checks ──────▶ S3 staged/
-                     │                        │
-                     ├── Snake case           ├── Row count ≥ 1
-                     ├── Deduplication        ├── Required fields not null
-                     ├── Enrichment           ├── Year range validation
-                     └── Timestamps           └── Record type validation
-                                                       │
-                                                       ▼ (on failure)
-                                                   SQS DLQ + Alert
-```
+| Feature | Benefit |
+|---------|---------|
+| **Schema Evolution** | Automatically handles API changes without code updates |
+| **Data Contracts** | Define and enforce data expectations at extraction |
+| **Incremental Loading** | Efficient updates with state management |
+| **Multi-Destination** | Same code works with DuckDB, Snowflake, BigQuery |
+| **Python Native** | Easy debugging and testing |
+| **Fast Iteration** | No cloud dependencies for development |
 
-**Transformations Applied:**
+### DuckDB as Local Warehouse
 
-| From | To |
-|------|-----|
-| `countryCode` | `country_code` |
-| `countryName` | `country_name` |
-| `isoa2` | `iso_alpha2` |
-| `record` | `record_type` |
-| - | `extracted_at`, `transformed_at` |
-| Duplicates | Deduplicated by `(country_code, year, record_type)` |
+**Why DuckDB:**
+- **Zero setup**: Single file database, no server required
+- **SQL compatible**: Same queries work in Snowflake
+- **Fast**: Columnar storage optimized for analytics
+- **Portable**: Share database files for reproducibility
+- **Technical challenge requirement**: Demonstrates versatility
 
-### Phase 3: Load (Lambda + dlt)
+```python
+# Local development with dlt + DuckDB
+import dlt
+from dlt.destinations import duckdb
 
-```
-S3 staged/ ──────▶ Load Lambda ──────▶ dlt Pipeline ──────▶ Snowflake
-                                            │
-                                            ├── Schema evolution
-                                            ├── Incremental merge
-                                            ├── State tracking
-                                            └── Data contracts (optional)
+pipeline = dlt.pipeline(
+    pipeline_name="gfn_local",
+    destination=duckdb("data/gfn.duckdb"),
+    dataset_name="ecological_footprint"
+)
+
+# Same extraction logic, different destination
+pipeline.run(extract_gfn_data())
 ```
 
 ---
 
-## Step Functions State Machine
+## Infrastructure as Code
+
+### Terraform (Recommended)
+
+This project uses **Terraform** for infrastructure provisioning. See the `terraform/` directory for complete configurations.
+
+#### Terraform vs CloudFormation Comparison
+
+| Aspect | Terraform | CloudFormation |
+|--------|-----------|----------------|
+| **Multi-Cloud Support** | ✅ AWS, GCP, Azure, Snowflake | ❌ AWS only |
+| **Vendor Lock-in** | ✅ None - portable HCL | ❌ AWS-specific |
+| **Snowflake Provider** | ✅ Native support | ❌ Not available |
+| **State Management** | Remote backends (S3, Terraform Cloud) | Managed by AWS |
+| **Language** | HCL (declarative, readable) | JSON/YAML (verbose) |
+| **Community Modules** | ✅ Extensive registry | ⚠️ Limited |
+| **Plan/Preview** | ✅ `terraform plan` | ⚠️ Change sets (limited) |
+| **Import Existing** | ✅ `terraform import` | ⚠️ Complex |
+| **Learning Curve** | Moderate | Lower for AWS-only |
+
+#### Why Terraform for This Project
+
+1. **Snowflake Integration**: Native provider for Snowflake resources (pipes, stages, warehouses)
+2. **Multi-Cloud Ready**: Same tool for AWS infrastructure and Snowflake configuration
+3. **No Vendor Lock-in**: Portable skills and configurations
+4. **Better State Management**: Remote state with locking prevents conflicts
+5. **Mature Ecosystem**: Rich module registry and community support
+
+#### Terraform Structure
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    STEP FUNCTIONS WORKFLOW                       │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│   [Start] ──▶ [Extract] ──▶ [Transform] ──▶ [Soda] ──▶ [Load]   │
-│                   │              │            │           │      │
-│                   │              │            │           │      │
-│                   ▼              ▼            ▼           ▼      │
-│              (on error)    (on error)   (on fail)   (on error)  │
-│                   │              │            │           │      │
-│                   └──────────────┴────────────┴───────────┘      │
-│                                  │                               │
-│                                  ▼                               │
-│                          [Handle Error]                          │
-│                                  │                               │
-│                          ┌──────┴──────┐                         │
-│                          │             │                         │
-│                   attempts < 3    attempts ≥ 3                   │
-│                          │             │                         │
-│                          ▼             ▼                         │
-│                      [Retry]     [Send to DLQ]                   │
-│                          │             │                         │
-│                          └─────▶ [End] ◀┘                        │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+terraform/
+├── main.tf              # Provider configuration
+├── variables.tf         # Input variables
+├── outputs.tf           # Output values
+├── s3.tf                # S3 buckets and policies
+├── lambda.tf            # Lambda functions
+├── step_functions.tf    # State machine definition
+├── eventbridge.tf       # Scheduler rules
+├── sqs.tf               # Queues and DLQ
+├── sns.tf               # Notification topics
+├── iam.tf               # IAM roles and policies
+├── snowflake.tf         # Snowflake resources (pipe, stage)
+└── modules/
+    └── data_pipeline/   # Reusable pipeline module
 ```
 
-### State Machine Definition
+#### Key Terraform Resources
 
-```json
-{
-  "StartAt": "Extract",
-  "States": {
-    "Extract": {
-      "Type": "Task",
-      "Resource": "arn:aws:lambda:REGION:ACCOUNT:function:gfn-extract",
-      "Next": "Transform",
-      "Retry": [{"ErrorEquals": ["States.ALL"], "MaxAttempts": 3}],
-      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "HandleError"}]
-    },
-    "Transform": {
-      "Type": "Task",
-      "Resource": "arn:aws:lambda:REGION:ACCOUNT:function:gfn-transform",
-      "Next": "SodaChecks"
-    },
-    "SodaChecks": {
-      "Type": "Choice",
-      "Choices": [
-        {"Variable": "$.soda_passed", "BooleanEquals": true, "Next": "Load"}
-      ],
-      "Default": "HandleError"
-    },
-    "Load": {
-      "Type": "Task",
-      "Resource": "arn:aws:lambda:REGION:ACCOUNT:function:gfn-load",
-      "End": true
-    },
-    "HandleError": {
-      "Type": "Task",
-      "Resource": "arn:aws:lambda:REGION:ACCOUNT:function:gfn-error-handler",
-      "Next": "SendToDLQ"
-    },
-    "SendToDLQ": {
-      "Type": "Task",
-      "Resource": "arn:aws:sqs:REGION:ACCOUNT:gfn-dlq",
-      "End": true
+```hcl
+# Example: Snowflake Pipe with Terraform
+resource "snowflake_pipe" "gfn_pipe" {
+  database = snowflake_database.gfn.name
+  schema   = snowflake_schema.raw.name
+  name     = "GFN_ECOLOGICAL_FOOTPRINT_PIPE"
+  
+  copy_statement = <<-SQL
+    COPY INTO ${snowflake_table.ecological_footprint.name}
+    FROM @${snowflake_stage.gfn_stage.name}/transformed/
+    FILE_FORMAT = (TYPE = 'PARQUET')
+  SQL
+  
+  auto_ingest = true
+}
+
+# Example: Step Functions State Machine
+resource "aws_sfn_state_machine" "gfn_pipeline" {
+  name     = "gfn-data-pipeline"
+  role_arn = aws_iam_role.step_functions.arn
+  
+  definition = jsonencode({
+    StartAt = "Extract"
+    States = {
+      Extract = {
+        Type     = "Task"
+        Resource = aws_lambda_function.extract.arn
+        Next     = "Transform"
+        Retry    = [{ ErrorEquals = ["States.ALL"], MaxAttempts = 3 }]
+      }
+      # ... additional states
     }
-  }
+  })
 }
 ```
+
+#### CloudFormation Alternative
+
+While Terraform is recommended, CloudFormation can be used for AWS-only deployments:
+
+**Pros:**
+- Native AWS integration
+- No additional tooling required
+- AWS-managed state
+- Drift detection built-in
+
+**Cons:**
+- Cannot manage Snowflake resources
+- Verbose JSON/YAML syntax
+- Limited preview capabilities
+- AWS vendor lock-in
+
+---
+
+## Data Flow
+
+### Production Flow
+
+```
+1. EventBridge triggers Step Functions (daily 6 AM UTC)
+2. Extract Lambda fetches data from GFN API
+3. Raw data stored in S3 raw/ (immutable, partitioned by date)
+4. Transform Lambda validates and transforms data
+5. Transformed data stored in S3 transformed/ (Parquet format)
+6. S3 event notification triggers Snowpipe
+7. Snowpipe auto-ingests into Snowflake RAW schema
+8. Snowflake Stream + Task transforms to TRANSFORMED schema
+9. SNS notification sent on completion
+10. Errors routed to SQS DLQ for investigation
+```
+
+### Local Development Flow
+
+```
+1. Run `make extract` or `python -m gfn_pipeline.extract`
+2. dlt fetches data from GFN API
+3. Data validated against contracts
+4. Loaded into DuckDB (data/gfn.duckdb)
+5. Soda checks run for quality validation
+6. Results available for local querying
+```
+
+---
+
+## Two-Tier Data Validation
+
+### Validation Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                           TWO-TIER VALIDATION                                        │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│   TIER 1: Staging Checks (Pre-Load)          TIER 2: Quality Checks (Post-Load)     │
+│   ─────────────────────────────────          ──────────────────────────────────     │
+│                                                                                      │
+│   ┌─────────────────────────────┐            ┌─────────────────────────────┐        │
+│   │  soda/staging_checks.yml   │            │  soda/checks.yml            │        │
+│   │                             │            │                             │        │
+│   │  • Schema validation        │            │  • Row count thresholds     │        │
+│   │  • Required fields          │            │  • Freshness checks         │        │
+│   │  • Data type checks         │            │  • Referential integrity    │        │
+│   │  • Null constraints         │            │  • Business rules           │        │
+│   │  • Format validation        │            │  • Anomaly detection        │        │
+│   └──────────────┬──────────────┘            └──────────────┬──────────────┘        │
+│                  │                                          │                        │
+│                  ▼                                          ▼                        │
+│   ┌─────────────────────────────┐            ┌─────────────────────────────┐        │
+│   │  validators.py              │            │  Soda Core                  │        │
+│   │  (Python validation)        │            │  (SQL-based checks)         │        │
+│   └─────────────────────────────┘            └─────────────────────────────┘        │
+│                                                                                      │
+│   Runs: Before S3 transformed/               Runs: After Snowflake load             │
+│   Fails: Prevents bad data loading           Fails: Alerts for investigation        │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Staging Checks (Pre-Load)
+
+Located in `soda/staging_checks.yml`:
+- Schema validation (required columns, data types)
+- Null constraints on critical fields
+- Format validation (ISO country codes, years)
+- Value range checks (positive numbers, valid ranges)
+
+### Quality Checks (Post-Load)
+
+Located in `soda/checks.yml`:
+- Row count monitoring with thresholds
+- Data freshness validation
+- Referential integrity between tables
+- Business rule validation
+- Statistical anomaly detection
 
 ---
 
@@ -226,192 +381,120 @@ S3 staged/ ──────▶ Load Lambda ──────▶ dlt Pipeline 
 
 ```
 s3://gfn-data-lake/
-├── raw/                                    # Immutable audit trail
-│   └── gfn_footprint_{YYYYMMDD_HHMMSS}.json
-├── staged/                                 # Validated, ready for dlt
-│   └── gfn_footprint_{YYYYMMDD_HHMMSS}_staged.json
-└── failed/                                 # Dead letter queue
-    └── {original_filename}_failed.json
+├── raw/
+│   └── ecological_footprint/
+│       └── year=2024/
+│           └── month=01/
+│               └── day=15/
+│                   └── data_20240115_060000.json
+├── transformed/
+│   └── ecological_footprint/
+│       └── year=2024/
+│           └── month=01/
+│               └── day=15/
+│                   └── data_20240115_060000.parquet
+├── failed/
+│   └── ecological_footprint/
+│       └── 2024/01/15/
+│           └── error_20240115_060000.json
+└── metadata/
+    └── schemas/
+        └── ecological_footprint_v1.json
 ```
 
-### File Naming Convention
+### Partitioning Strategy
 
-| Stage | Pattern | Example |
-|-------|---------|---------|
-| Raw | `gfn_footprint_{timestamp}.json` | `gfn_footprint_20260131_030733.json` |
-| Staged | `gfn_footprint_{timestamp}_staged.json` | `gfn_footprint_20260131_030733_staged.json` |
-
----
-
-## Soda Data Quality Checks
-
-### Two-Tier Validation Architecture
-
-The pipeline uses a **two-tier validation** approach:
-
-| Tier | File | When | Purpose |
-|------|------|------|---------|
-| **Staging (Pre-load)** | `soda/staging_checks.yml` | Before loading to destination | Validate data in Python before dlt load |
-| **Post-load** | `soda/checks.yml` | After loading to Snowflake | Validate data in Snowflake tables |
-
-```
-Extract → S3 Raw → [Staging Checks] → S3 Staged → dlt → Snowflake → [Post-load Checks]
-                         │                                                │
-                   staging_checks.yml                               checks.yml
-                   (Python validator)                              (Soda Core)
-```
-
-### Staging Checks (Pre-load)
-
-Defined in `soda/staging_checks.yml`, executed by `src/gfn_pipeline/validators.py`:
-
-```yaml
-# soda/staging_checks.yml
-footprint_data:
-  row_count: {min: 1}
-  required_columns: [country_code, country_name, year, record_type]
-  valid_year_range: {min: 1960, max: 2030}
-  valid_record_types: [EFConsTotGHA, BiocapTotGHA, ...]
-  non_negative_value: true
-  unique_key: [country_code, year, record_type]
-
-countries:
-  row_count: {min: 1}
-  required_columns: [country_code, country_name]
-  unique_key: [country_code]
-  min_country_coverage: 150
-```
-
-### Post-load Checks (Snowflake)
-
-Defined in `soda/checks.yml`, executed via `make run-soda`:
-
-| Table | Check | Rule |
-|-------|-------|------|
-| `footprint_data` | Row count | ≥ 1 |
-| `footprint_data` | Required columns | `country_code`, `country_name`, `year`, `record_type` not null |
-| `footprint_data` | Year range | 1960 ≤ year ≤ 2030 |
-| `footprint_data` | Record types | Must be in valid list (28 types) |
-| `footprint_data` | Value | ≥ 0 (non-negative) |
-| `footprint_data` | Unique key | No duplicates on `(country_code, year, record_type)` |
-| `countries` | Row count | ≥ 1 |
-| `countries` | Required columns | `country_code`, `country_name` not null |
-
-### Running Soda Checks
-
-```bash
-# Enable Soda checks (fail on error)
-make run-soda
-
-# Soda checks in warn-only mode
-make run-soda-warn
-
-# Production: Snowflake + Soda + contracts
-make run-production
-```
-
----
-
-## dlt Features
-
-### Schema Evolution
-
-When the GFN API adds new fields, dlt automatically evolves the schema:
-
-```
-Day 1: API returns { a, b, c }     → Schema: columns a, b, c
-Day 2: API returns { a, b, c, d }  → Schema: columns a, b, c, d (auto-added)
-```
-
-### Incremental Loading
-
-```
-Run 1 (Initial):     Load 2010-2024, all records     → State: last_year = 2024
-Run 2 (Incremental): Load 2023-2024 only, new data   → State: last_year = 2024
-Run 3 (Full Refresh): Load 2010-2024, replace all    → State: reset
-```
-
-### Data Contracts
-
-Optional strict schema enforcement:
-
-```python
-@dlt.resource(
-    columns={
-        "country_code": {"data_type": "bigint", "nullable": False},
-        "year": {"data_type": "bigint", "nullable": False},
-        "value": {"data_type": "double", "nullable": True},
-    }
-)
-def footprint_data_resource(...):
-    ...
-```
+- **Time-based partitioning**: `year/month/day` for efficient querying
+- **Immutable raw layer**: Never modify, only append
+- **Transformed layer**: Parquet format for Snowpipe compatibility
+- **Failed layer**: Quarantine for investigation
 
 ---
 
 ## Error Handling
 
+### Retry Strategy
+
 ```
-Error ──▶ Attempt 1 (immediate) ──▶ Attempt 2 (1 min) ──▶ Attempt 3 (5 min) ──▶ DLQ
-                                                                                  │
-                                                                                  ▼
-                                                              CloudWatch Alarm ──▶ SNS ──▶ Alert
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              ERROR HANDLING FLOW                                     │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│   Lambda Execution                                                                   │
+│        │                                                                             │
+│        ▼                                                                             │
+│   ┌─────────┐     Success     ┌─────────────┐                                       │
+│   │ Execute │────────────────▶│ Next State  │                                       │
+│   └────┬────┘                 └─────────────┘                                       │
+│        │                                                                             │
+│        │ Failure                                                                     │
+│        ▼                                                                             │
+│   ┌─────────────────────────────────────────────────────────────────┐               │
+│   │                    RETRY POLICY                                  │               │
+│   │   Attempt 1: Wait 1s  → Retry                                   │               │
+│   │   Attempt 2: Wait 2s  → Retry (exponential backoff)             │               │
+│   │   Attempt 3: Wait 4s  → Retry                                   │               │
+│   │   Attempt 4: FAIL     → Route to DLQ                            │               │
+│   └─────────────────────────────────────────────────────────────────┘               │
+│        │                                                                             │
+│        ▼                                                                             │
+│   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐                           │
+│   │  SQS DLQ    │────▶│  CloudWatch │────▶│    Alert    │                           │
+│   │  (persist)  │     │  (log)      │     │  (SNS/Slack)│                           │
+│   └─────────────┘     └─────────────┘     └─────────────┘                           │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Retry Configuration
+### Error Categories
 
-| Attempt | Delay | Action |
-|---------|-------|--------|
-| 1 | Immediate | Retry same Lambda |
-| 2 | 1 minute | Retry with backoff |
-| 3 | 5 minutes | Final attempt |
-| 4+ | - | Send to Dead Letter Queue |
+| Error Type | Handling | Recovery |
+|------------|----------|----------|
+| Transient (network, timeout) | Automatic retry | Exponential backoff |
+| Data validation | Route to failed/ | Manual review |
+| Schema mismatch | Alert + DLQ | Schema evolution |
+| API rate limit | Retry with backoff | Adjust schedule |
+| Infrastructure | Alert + manual | Terraform redeploy |
 
 ---
 
-## Observability Stack
+## Observability
 
-| Component | Purpose | Implementation |
-|-----------|---------|----------------|
-| **Metrics** | Performance tracking | CloudWatch Metrics (duration, errors, throttles) |
-| **Logs** | Debugging | CloudWatch Logs (structured JSON) |
-| **Tracing** | End-to-end visibility | AWS X-Ray |
-| **Alerting** | Incident response | CloudWatch Alarms → SNS → Email/Slack |
-| **Data Quality** | Validation | Soda Checks |
+### Monitoring Stack
 
----
-
-## Local Development
-
-```bash
-# Start LocalStack + create resources
-make setup
-
-# Run dlt + S3 pipeline (recommended)
-make run
-
-# Run with Soda checks
-make run-soda
-
-# Run production config
-make run-production
-
-# Backfill operations
-make backfill-recent          # 2020-2024
-make backfill-full            # 1961-2024
-make backfill YEARS=2010-2015 # Custom range
-
-# Testing (all tests ~7s)
-make test                     # All tests
-make test-unit                # Unit tests only (no LocalStack)
-make test-integration         # Integration tests (requires LocalStack)
+```
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              OBSERVABILITY                                           │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                      │
+│   ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐              │
+│   │   CloudWatch    │     │   Snowflake     │     │     Soda        │              │
+│   │   ───────────   │     │   ───────────   │     │   ───────────   │              │
+│   │   • Lambda logs │     │   • Query hist  │     │   • Check results│             │
+│   │   • Metrics     │     │   • Pipe status │     │   • Anomalies   │              │
+│   │   • Alarms      │     │   • Copy hist   │     │   • Trends      │              │
+│   │   • Dashboards  │     │   • Costs       │     │   • Alerts      │              │
+│   └─────────────────┘     └─────────────────┘     └─────────────────┘              │
+│                                                                                      │
+│   Key Metrics:                                                                       │
+│   • Pipeline execution time                                                          │
+│   • Records processed per run                                                        │
+│   • Error rate and types                                                             │
+│   • Snowpipe latency                                                                 │
+│   • Data quality scores                                                              │
+│                                                                                      │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-LocalStack provides:
-- S3 (data lake simulation)
-- SQS (queue simulation)
-- EventBridge (scheduling simulation)
-- Step Functions (orchestration simulation)
+### Alerting Rules
+
+| Metric | Threshold | Action |
+|--------|-----------|--------|
+| Pipeline failure | Any | SNS → Email/Slack |
+| Execution time | > 10 min | Warning alert |
+| Error rate | > 5% | Critical alert |
+| DLQ depth | > 0 | Investigation alert |
+| Soda check failure | Any critical | Block + alert |
 
 ---
 
@@ -419,93 +502,77 @@ LocalStack provides:
 
 ```
 global_footprint_network_use_case/
-│
-├── src/gfn_pipeline/                    # Core pipeline package
-│   ├── __init__.py                      # Exports: run_pipeline, gfn_source
-│   ├── main.py                          # ✓ RECOMMENDED: dlt + S3 + Soda
-│   ├── validators.py                    # Soda staging validators (loads YAML)
-│   └── pipeline_async.py                # Async extraction with dlt (direct mode)
-│
-├── infrastructure/                      # AWS infrastructure
-│   ├── lambda_handlers.py               # Lambda functions (extract/transform/load)
-│   ├── setup_localstack.py              # LocalStack setup for local dev
-│   ├── setup_snowflake_production.py    # Snowflake production setup
-│   ├── cloudformation/                  # CloudFormation templates (IaC)
-│   └── snowflake/                       # Snowflake SQL scripts
-│
-├── tests/                               # Test suite
-│   └── test_pipeline.py                 # Unit and integration tests
-│
-├── soda/                                # Data quality (two-tier validation)
-│   ├── configuration.yml                # Soda Snowflake connection config
-│   ├── staging_checks.yml               # PRE-LOAD: Staging layer validation
-│   └── checks.yml                       # POST-LOAD: Snowflake table validation
-│
-├── docs/                                # Documentation
-│   ├── ARCHITECTURE.md                  # This file
-│   └── SNOWPIPE_SETUP.md                # Snowpipe setup (streaming alternative)
-│
-├── docker-compose.yml                   # LocalStack + services
-├── Makefile                             # Build/run commands
-└── pyproject.toml                       # Dependencies (uv)
+├── src/
+│   └── gfn_pipeline/
+│       ├── __init__.py
+│       ├── extract.py          # API extraction logic
+│       ├── transform.py        # Data transformation
+│       ├── load.py             # dlt loading (local)
+│       ├── validators.py       # Staging validation
+│       └── utils.py            # Shared utilities
+├── terraform/
+│   ├── main.tf                 # Provider config
+│   ├── s3.tf                   # S3 resources
+│   ├── lambda.tf               # Lambda functions
+│   ├── step_functions.tf       # State machine
+│   ├── snowflake.tf            # Snowflake resources
+│   └── ...
+├── soda/
+│   ├── checks.yml              # Post-load quality checks
+│   └── staging_checks.yml      # Pre-load validation
+├── tests/
+│   ├── test_pipeline.py        # Integration tests
+│   ├── test_extract.py         # Extraction tests
+│   └── test_transform.py       # Transform tests
+├── docs/
+│   ├── ARCHITECTURE.md         # This document
+│   └── SNOWPIPE_SETUP.md       # Snowpipe configuration
+├── data/
+│   └── gfn.duckdb              # Local DuckDB database
+├── Makefile                    # Development commands
+├── pyproject.toml              # Python dependencies
+└── README.md                   # Project overview
 ```
 
 ---
 
-## Alternative: Snowpipe for Streaming
+## Quick Reference
 
-For real-time/streaming requirements, the architecture can evolve to use Snowpipe:
+### Commands
 
+```bash
+# Local Development
+make extract          # Run extraction with dlt → DuckDB
+make test             # Run all tests with LocalStack
+make soda             # Run Soda quality checks
+
+# Production Deployment
+terraform init        # Initialize Terraform
+terraform plan        # Preview changes
+terraform apply       # Deploy infrastructure
+
+# Monitoring
+make logs             # View CloudWatch logs
+make status           # Check pipeline status
 ```
-CURRENT (Batch with dlt):
-S3 staged/ ──▶ dlt ──▶ Snowflake
 
-ALTERNATIVE (Streaming with Snowpipe):
-S3 transformed/ ──▶ SNS ──▶ Snowpipe ──▶ RAW table ──▶ Stream ──▶ Task ──▶ TRANSFORMED table
-```
+### Environment Variables
 
-**When to consider Snowpipe:**
-- Sub-minute latency requirements
-- Continuous high-volume ingestion
-- Native Snowflake ecosystem preference
-
-> 📘 See [SNOWPIPE_SETUP.md](SNOWPIPE_SETUP.md) for detailed Snowpipe configuration.
+| Variable | Purpose | Required |
+|----------|---------|----------|
+| `AWS_REGION` | AWS region | Yes |
+| `SNOWFLAKE_ACCOUNT` | Snowflake account | Production |
+| `SNOWFLAKE_USER` | Snowflake username | Production |
+| `SNOWFLAKE_PASSWORD` | Snowflake password | Production |
+| `GFN_API_KEY` | GFN API key (if required) | Optional |
 
 ---
 
-## Idempotency Strategy
+## References
 
-The pipeline is fully idempotent at multiple levels:
-
-| Level | Mechanism | Implementation |
-|-------|-----------|----------------|
-| File | S3 object keys | Timestamp-based naming prevents overwrites |
-| Record | Primary key | `(country_code, year, record_type)` |
-| Load | dlt merge | Updates existing, inserts new |
-
-### dlt Merge Pattern
-
-```python
-@dlt.resource(
-    write_disposition="merge",
-    primary_key=["country_code", "year", "record_type"],
-)
-def footprint_data_resource(...):
-    ...
-```
-
----
-
-## API Efficiency
-
-| Approach | API Calls (64 years) | Time |
-|----------|---------------------|------|
-| Per country/type | ~3,000+ | Hours |
-| **Bulk /data/all/{year}** | **~66** | **~2-3 min** |
-
-The pipeline uses the efficient bulk endpoint:
-```
-GET https://api.footprintnetwork.org/v1/data/all/{year}
-```
-
-Returns all countries and record types for a given year in a single call.
+- [dlt Documentation](https://dlthub.com/docs)
+- [Snowpipe Documentation](https://docs.snowflake.com/en/user-guide/data-load-snowpipe)
+- [Terraform AWS Provider](https://registry.terraform.io/providers/hashicorp/aws)
+- [Terraform Snowflake Provider](https://registry.terraform.io/providers/Snowflake-Labs/snowflake)
+- [Soda Core Documentation](https://docs.soda.io/soda-core)
+- [AWS Step Functions](https://docs.aws.amazon.com/step-functions)

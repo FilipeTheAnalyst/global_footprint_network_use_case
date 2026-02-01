@@ -6,15 +6,19 @@ A production-ready data pipeline for extracting carbon footprint data from the G
 
 ## Features
 
-- **dlt + S3 Data Lake Architecture**: Schema evolution, incremental loads, audit trail
-- **AWS Orchestration**: EventBridge, Step Functions, Lambda for production deployment
+- **Dual Architecture Design**:
+  - **Production**: Snowpipe + AWS Step Functions for enterprise-scale, event-driven loading
+  - **Local Development**: dlt + DuckDB for rapid iteration and testing
+- **Infrastructure as Code**: Terraform (recommended) with CloudFormation alternative
+- **AWS Orchestration**: EventBridge, Step Functions, Lambda, SQS, SNS
 - **Async extraction** with rate limiting and retry logic
-- **Soda data quality checks** on staging layer
+- **Two-tier data validation**: Soda staging checks (pre-load) + quality checks (post-load)
 - **Data contracts** for schema validation
 - **Idempotent processing** with deduplication by unique key
 - **Historical backfill** support (1961-2024)
 - **Local development** with LocalStack + DuckDB
-- **Optional Snowpipe**: Alternative for near real-time streaming (see [SNOWPIPE_SETUP.md](docs/SNOWPIPE_SETUP.md))
+
+> See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed architecture documentation including Terraform vs CloudFormation comparison.
 
 ---
 
@@ -66,18 +70,28 @@ SNOWFLAKE_WAREHOUSE=COMPUTE_WH
 
 ### Pipeline Architecture
 
-The pipeline uses a **dlt + S3 Data Lake** architecture:
+The pipeline supports **dual architectures** optimized for different environments:
 
+**Production (Snowpipe + AWS)**:
 ```
-Extract (async) → S3 Raw → Soda Checks → S3 Staged → dlt → Destination
+EventBridge → Step Functions → Lambda Extract → S3 Raw
+                            → Lambda Transform → S3 Staged
+                            → SNS → Snowpipe → Snowflake
+```
+
+**Local Development (dlt + DuckDB)**:
+```
+Extract (async) → S3 Raw → Soda Checks → S3 Staged → dlt → DuckDB
 ```
 
 **Key Features:**
 - **Schema Evolution**: New API fields automatically become columns
 - **Incremental Loads**: dlt tracks state, only processes new/changed data
 - **Data Contracts**: Enforce required fields with `--with-contracts`
-- **Soda Checks**: Data quality validation on staging layer
+- **Two-tier Validation**: Soda staging checks + quality checks
 - **Audit Trail**: Raw JSON preserved in S3 for replay/debugging
+
+> See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed architecture comparison.
 
 ### Basic Commands
 
@@ -243,6 +257,7 @@ global_footprint_network_use_case/
 ├── infrastructure/             # AWS infrastructure
 │   ├── lambda_handlers.py      # Lambda functions
 │   ├── setup_localstack.py     # LocalStack setup
+│   ├── terraform/              # Terraform IaC (recommended)
 │   └── snowflake/              # Snowflake SQL scripts
 ├── tests/                      # Test suite
 │   └── test_pipeline.py        # Unit + integration tests
@@ -267,46 +282,49 @@ global_footprint_network_use_case/
 
 ### Loading Approaches
 
-| Approach | Use Case | Documentation |
-|----------|----------|---------------|
-| **dlt (Recommended)** | Batch loads, schema evolution, merge/upsert | This README |
-| **Snowpipe (Alternative)** | Near real-time streaming, native AWS integration | [SNOWPIPE_SETUP.md](docs/SNOWPIPE_SETUP.md) |
+| Approach | Environment | Use Case |
+|----------|-------------|----------|
+| **Snowpipe (Production)** | AWS Production | Enterprise-scale, event-driven, near real-time |
+| **dlt (Local Development)** | LocalStack + DuckDB | Rapid iteration, testing, schema evolution |
 
-**Why dlt is recommended:**
+**Production Architecture (Snowpipe)**:
+- Event-driven loading via SNS notifications
+- Native AWS/Snowflake integration
+- No compute costs for loading (Snowflake handles it)
+- Enterprise-scale throughput
+
+**Local Development (dlt)**:
 - Automatic schema evolution (new API fields become columns)
 - Built-in merge/upsert with primary keys
 - State tracking for incremental loads
-- Works for both DuckDB (local) and Snowflake (production)
-- Simpler architecture - fewer AWS resources needed
+- Multi-destination support (DuckDB for local, Snowflake for staging)
+- Data contracts for schema validation
 
-**When to use Snowpipe:**
-- Near real-time streaming requirements (<1 min latency)
-- Native AWS/Snowflake integration preferred
-- No compute costs for loading (Snowflake handles it)
+> See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed architecture comparison and rationale.
 
-### Schema Overview (dlt)
+### Schema Overview
 
 | Schema | Purpose |
 |--------|---------|
-| `GFN_DATA` | Main data loaded by dlt |
-| `_DLT_*` | dlt internal tables (state, loads, versions) |
+| `GFN_DATA` | Main data loaded by dlt (local) or Snowpipe (production) |
+| `_DLT_*` | dlt internal tables (state, loads, versions) - local dev only |
 
-### Data Flow (dlt - Recommended)
+### Data Flow (Production - Snowpipe)
 
 ```
-S3 (staged/) → Lambda (dlt) → Snowflake GFN_DATA.FOOTPRINT_DATA
+S3 (transformed/) → SNS → Snowpipe → RAW.FOOTPRINT_DATA_RAW
+                                            │
+                                            │ Stream + Task
+                                            ▼
+                                  TRANSFORMED.FOOTPRINT_DATA
+```
+
+### Data Flow (Local Development - dlt)
+
+```
+S3 (staged/) → Lambda (dlt) → DuckDB/Snowflake GFN_DATA.FOOTPRINT_DATA
                     │
                     └── Schema evolution, merge/upsert, state tracking
-```
-
-### Data Flow (Snowpipe - Alternative)
-
-```
-S3 (transformed/) → Snowpipe → RAW.FOOTPRINT_DATA_RAW
-                                        │
-                                        │ Stream + Task
-                                        ▼
-                              TRANSFORMED.FOOTPRINT_DATA
 ```
 
 See [docs/SNOWPIPE_SETUP.md](docs/SNOWPIPE_SETUP.md) for detailed Snowpipe setup instructions.
@@ -424,16 +442,16 @@ See [docs/SNOWPIPE_SETUP.md](docs/SNOWPIPE_SETUP.md) for troubleshooting.
 
 ## Architecture
 
-For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+For detailed architecture documentation including Terraform vs CloudFormation comparison, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-### High-Level Overview (Recommended: AWS + dlt)
+### Production Architecture (Snowpipe + AWS)
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   TRIGGER   │────▶│   EXTRACT   │────▶│   STAGE     │────▶│    LOAD     │
+│   TRIGGER   │────▶│   EXTRACT   │────▶│  TRANSFORM  │────▶│    LOAD     │
 │             │     │             │     │             │     │             │
-│ EventBridge │     │   Lambda    │     │   Lambda    │     │   Lambda    │
-│ Step Funcs  │     │   GFN API   │     │   Soda QA   │     │    dlt      │
+│ EventBridge │     │   Lambda    │     │   Lambda    │     │  Snowpipe   │
+│ Step Funcs  │     │   GFN API   │     │   Soda QA   │     │  (via SNS)  │
 └─────────────┘     └──────┬──────┘     └──────┬──────┘     └──────┬──────┘
                            │                   │                   │
                            ▼                   ▼                   ▼
@@ -443,13 +461,32 @@ For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITE
                     └─────────────────────────────────────────────────────┘
 ```
 
-### Alternative: Snowpipe for Streaming
-
-For near real-time streaming scenarios, see [docs/SNOWPIPE_SETUP.md](docs/SNOWPIPE_SETUP.md).
+### Local Development Architecture (dlt + DuckDB)
 
 ```
-S3 (transformed/) → SNS → SQS → Snowpipe → Snowflake RAW schema
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   TRIGGER   │────▶│   EXTRACT   │────▶│   STAGE     │────▶│    LOAD     │
+│             │     │             │     │             │     │             │
+│   Manual    │     │   Async     │     │   Soda QA   │     │    dlt      │
+│  or Script  │     │   GFN API   │     │   Checks    │     │   DuckDB    │
+└─────────────┘     └──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+                           │                   │                   │
+                           ▼                   ▼                   ▼
+                    ┌─────────────────────────────────────────────────────┐
+                    │               LOCALSTACK S3 + DUCKDB                 │
+                    │         raw/ ────────▶ staged/ ──────────▶ DuckDB   │
+                    └─────────────────────────────────────────────────────┘
 ```
+
+**Why dlt for local development:**
+- Schema evolution and data contracts
+- Multi-destination support (DuckDB for local, Snowflake for staging)
+- Rapid iteration without cloud dependencies
+
+**Why Snowpipe for production:**
+- Event-driven, near real-time loading
+- Native AWS/Snowflake integration
+- Enterprise-scale throughput
 
 ---
 
