@@ -409,8 +409,23 @@ The project includes a comprehensive GitHub Actions workflow for continuous inte
 | **Integration Tests** | All pushes/PRs | LocalStack-based AWS integration tests |
 | **Security Scan** | All pushes/PRs | Bandit + TruffleHog secret detection |
 | **Data Quality** | Main branch only | Sample extraction + Soda validation |
-| **Deploy Staging** | Develop branch | Deploy to staging environment |
-| **Deploy Production** | Main branch | Deploy to production environment |
+| **Deploy Staging** | Develop branch | LocalStack + dlt + DuckDB pipeline |
+| **Deploy Production** | Main branch | Real AWS + Snowpipe + Snowflake (requires credentials) |
+
+### Deployment Environments
+
+**Staging (LocalStack + dlt + DuckDB)**:
+- Triggered on pushes to `develop` branch
+- Uses LocalStack to emulate AWS services (S3, SQS, SNS, Lambda, etc.)
+- Runs the full dlt pipeline with DuckDB destination
+- Validates data extraction and uploads DuckDB as artifact
+- No cloud credentials required
+
+**Production (AWS + Snowpipe + Snowflake)**:
+- Triggered on pushes to `main` branch
+- Requires AWS and Snowflake credentials configured as GitHub secrets
+- Skips gracefully if credentials are not configured
+- Deploys Lambda functions and Terraform infrastructure
 
 ### Local Testing (Recommended)
 
@@ -459,38 +474,14 @@ Configure these secrets in GitHub repository settings:
 
 | Secret | Required For | Description |
 |--------|--------------|-------------|
-| `GFN_API_KEY` | Data quality checks | Global Footprint Network API key |
-| `AWS_ACCESS_KEY_ID` | Deployment | AWS credentials for staging/production |
-| `AWS_SECRET_ACCESS_KEY` | Deployment | AWS credentials for staging/production |
-| `SNOWFLAKE_ACCOUNT` | Production | Snowflake account identifier |
-| `SNOWFLAKE_USER` | Production | Snowflake username |
-| `SNOWFLAKE_PASSWORD` | Production | Snowflake password |
+| `GFN_API_KEY` | Staging + Data quality | Global Footprint Network API key |
+| `AWS_ACCESS_KEY_ID` | Production only | AWS credentials for production deployment |
+| `AWS_SECRET_ACCESS_KEY` | Production only | AWS credentials for production deployment |
+| `SNOWFLAKE_ACCOUNT` | Production only | Snowflake account identifier |
+| `SNOWFLAKE_USER` | Production only | Snowflake username |
+| `SNOWFLAKE_PASSWORD` | Production only | Snowflake password |
 
-### Local CI Testing with act
-
-```bash
-# Create a .secrets file for local testing (not committed to git)
-cat > .secrets << 'EOF'
-GITHUB_TOKEN=ghp_your_token_here
-GFN_API_KEY=your_api_key_here
-AWS_ACCESS_KEY_ID=test
-AWS_SECRET_ACCESS_KEY=test
-EOF
-
-# Or use GitHub CLI token
-echo "GITHUB_TOKEN=$(gh auth token)" >> .secrets
-
-# Run with secrets file
-act --secret-file .secrets --container-architecture linux/amd64
-
-# Run specific job
-act -j lint --secret-file .secrets --container-architecture linux/amd64
-
-# Run with verbose output
-act -v --secret-file .secrets --container-architecture linux/amd64
-```
-
-> **Note**: Integration tests with LocalStack may require Docker-in-Docker support. For best results, run integration tests directly with `make test-integration`.
+> **Note**: Staging deployment uses LocalStack and doesn't require AWS credentials. Only `GFN_API_KEY` is needed for the staging pipeline to extract real data.
 
 ---
 
