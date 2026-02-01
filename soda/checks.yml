@@ -37,10 +37,34 @@ checks for GFN_FOOTPRINT_DATA_RAW:
       name: "Value is non-negative"
       valid min: 0
   
-  # Record type validation - must be one of the 28 valid types
+  # Record type validation - must be one of the valid types from GFN API
   - invalid_count(RECORD_TYPE) = 0:
       name: "Record type is valid"
       valid values:
+        # Ecological Footprint - Total (Global Hectares)
+        - EFConsTotGHA
+        - EFProdTotGHA
+        - EFImportsTotGHA
+        - EFExportsTotGHA
+        # Ecological Footprint - Per Capita
+        - EFConsPerCap
+        - EFProdPerCap
+        - EFImportsPerCap
+        - EFExportsPerCap
+        # Biocapacity
+        - BiocapTotGHA
+        - BiocapPerCap
+        # Area
+        - AreaTotHA
+        - AreaPerCap
+        # Economic & Social Indicators
+        - Population
+        - GDP-PPP
+        - GDP-USD
+        - HDI
+        # Derived
+        - Earths
+        # Legacy record types (for backward compatibility)
         - EFCtot
         - EFCcrop
         - EFCgraz

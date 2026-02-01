@@ -91,6 +91,19 @@ class SodaStagingValidator:
             "required_columns": ["country_code", "country_name", "year", "record_type"],
             "valid_year_range": {"min": 1960, "max": 2030},
             "valid_record_types": [
+                # Ecological Footprint - Total (Global Hectares)
+                "EFConsTotGHA", "EFProdTotGHA", "EFImportsTotGHA", "EFExportsTotGHA",
+                # Ecological Footprint - Per Capita
+                "EFConsPerCap", "EFProdPerCap", "EFImportsPerCap", "EFExportsPerCap",
+                # Biocapacity
+                "BiocapTotGHA", "BiocapPerCap",
+                # Area
+                "AreaTotHA", "AreaPerCap",
+                # Economic & Social Indicators
+                "Population", "GDP-PPP", "GDP-USD", "HDI",
+                # Derived
+                "Earths",
+                # Legacy record types (for backward compatibility)
                 "EFCtot", "EFCcrop", "EFCgraz", "EFCfrst", "EFCfish", "EFCbult", "EFCcarb",
                 "BioCaptot", "BioCapcrop", "BioCapgraz", "BioCapfrst", "BioCapfish", "BioCapbult",
                 "EFCtotPerCap", "EFCcropPerCap", "EFCgrazPerCap", "EFCfrstPerCap",
