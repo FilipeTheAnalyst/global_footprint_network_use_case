@@ -220,9 +220,21 @@ jobs:
     if: github.ref == 'refs/heads/develop'
     environment: staging
     steps:
+      - name: Check for AWS credentials
+        id: check-creds
+        run: |
+          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
+            echo "has_creds=false" >> $GITHUB_OUTPUT
+            echo "⚠️ AWS credentials not configured - skipping deployment"
+          else
+            echo "has_creds=true" >> $GITHUB_OUTPUT
+          fi
+      
       - uses: actions/checkout@v4
+        if: steps.check-creds.outputs.has_creds == 'true'
       
       - name: Configure AWS credentials
+        if: steps.check-creds.outputs.has_creds == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -230,18 +242,22 @@ jobs:
           aws-region: us-east-1
       
       - name: Install uv
+        if: steps.check-creds.outputs.has_creds == 'true'
         uses: astral-sh/setup-uv@v4
         with:
           version: "latest"
           github-token: ${{ github.token }}
       
       - name: Set up Python
+        if: steps.check-creds.outputs.has_creds == 'true'
         run: uv python install ${{ env.PYTHON_VERSION }}
       
       - name: Install dependencies
+        if: steps.check-creds.outputs.has_creds == 'true'
         run: uv sync
       
       - name: Deploy Lambda functions to staging
+        if: steps.check-creds.outputs.has_creds == 'true'
         run: |
           echo "Deploying to staging environment..."
           # Package Lambda functions
@@ -259,9 +275,21 @@ jobs:
     if: github.ref == 'refs/heads/main'
     environment: production
     steps:
+      - name: Check for AWS credentials
+        id: check-creds
+        run: |
+          if [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
+            echo "has_creds=false" >> $GITHUB_OUTPUT
+            echo "⚠️ AWS credentials not configured - skipping deployment"
+          else
+            echo "has_creds=true" >> $GITHUB_OUTPUT
+          fi
+      
       - uses: actions/checkout@v4
+        if: steps.check-creds.outputs.has_creds == 'true'
       
       - name: Configure AWS credentials
+        if: steps.check-creds.outputs.has_creds == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -269,18 +297,22 @@ jobs:
           aws-region: us-east-1
       
       - name: Install uv
+        if: steps.check-creds.outputs.has_creds == 'true'
         uses: astral-sh/setup-uv@v4
         with:
           version: "latest"
           github-token: ${{ github.token }}
       
       - name: Set up Python
+        if: steps.check-creds.outputs.has_creds == 'true'
         run: uv python install ${{ env.PYTHON_VERSION }}
       
       - name: Install dependencies
+        if: steps.check-creds.outputs.has_creds == 'true'
         run: uv sync
       
       - name: Deploy Lambda functions to production
+        if: steps.check-creds.outputs.has_creds == 'true'
         run: |
           echo "Deploying to production environment..."
           # Package Lambda functions
