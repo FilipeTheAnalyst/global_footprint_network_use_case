@@ -7,13 +7,14 @@ A production-ready data pipeline for extracting carbon footprint data from the G
 ## Features
 
 - **dlt + S3 Data Lake Architecture**: Schema evolution, incremental loads, audit trail
+- **AWS Orchestration**: EventBridge, Step Functions, Lambda for production deployment
 - **Async extraction** with rate limiting and retry logic
 - **Soda data quality checks** on staging layer
 - **Data contracts** for schema validation
-- **Snowpipe integration** for automated S3 → Snowflake loading
 - **Idempotent processing** with deduplication by unique key
 - **Historical backfill** support (1961-2024)
-- **Local development** with LocalStack
+- **Local development** with LocalStack + DuckDB
+- **Optional Snowpipe**: Alternative for near real-time streaming (see [SNOWPIPE_SETUP.md](docs/SNOWPIPE_SETUP.md))
 
 ---
 
@@ -259,16 +260,41 @@ global_footprint_network_use_case/
 
 ## Snowflake Integration
 
-### Schema Overview
+### Loading Approaches
+
+| Approach | Use Case | Documentation |
+|----------|----------|---------------|
+| **dlt (Recommended)** | Batch loads, schema evolution, merge/upsert | This README |
+| **Snowpipe (Alternative)** | Near real-time streaming, native AWS integration | [SNOWPIPE_SETUP.md](docs/SNOWPIPE_SETUP.md) |
+
+**Why dlt is recommended:**
+- Automatic schema evolution (new API fields become columns)
+- Built-in merge/upsert with primary keys
+- State tracking for incremental loads
+- Works for both DuckDB (local) and Snowflake (production)
+- Simpler architecture - fewer AWS resources needed
+
+**When to use Snowpipe:**
+- Near real-time streaming requirements (<1 min latency)
+- Native AWS/Snowflake integration preferred
+- No compute costs for loading (Snowflake handles it)
+
+### Schema Overview (dlt)
 
 | Schema | Purpose |
 |--------|---------|
-| `RAW` | Raw JSON data from Snowpipe |
-| `TRANSFORMED` | Structured, deduplicated data |
-| `ANALYTICS` | Aggregated summaries |
-| `MONITORING` | Pipeline health views |
+| `GFN_DATA` | Main data loaded by dlt |
+| `_DLT_*` | dlt internal tables (state, loads, versions) |
 
-### Data Flow
+### Data Flow (dlt - Recommended)
+
+```
+S3 (staged/) → Lambda (dlt) → Snowflake GFN_DATA.FOOTPRINT_DATA
+                    │
+                    └── Schema evolution, merge/upsert, state tracking
+```
+
+### Data Flow (Snowpipe - Alternative)
 
 ```
 S3 (transformed/) → Snowpipe → RAW.FOOTPRINT_DATA_RAW
@@ -276,15 +302,9 @@ S3 (transformed/) → Snowpipe → RAW.FOOTPRINT_DATA_RAW
                                         │ Stream + Task
                                         ▼
                               TRANSFORMED.FOOTPRINT_DATA
-                                        │
-                                        │ Task
-                                        ▼
-                              ANALYTICS.FOOTPRINT_SUMMARY
 ```
 
-### Setup
-
-See [docs/SNOWPIPE_SETUP.md](docs/SNOWPIPE_SETUP.md) for detailed Snowflake setup instructions.
+See [docs/SNOWPIPE_SETUP.md](docs/SNOWPIPE_SETUP.md) for detailed Snowpipe setup instructions.
 
 ---
 
@@ -401,21 +421,29 @@ See [docs/SNOWPIPE_SETUP.md](docs/SNOWPIPE_SETUP.md) for troubleshooting.
 
 For detailed architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-### High-Level Overview
+### High-Level Overview (Recommended: AWS + dlt)
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   TRIGGER   │────▶│   EXTRACT   │────▶│  TRANSFORM  │────▶│    LOAD     │
+│   TRIGGER   │────▶│   EXTRACT   │────▶│   STAGE     │────▶│    LOAD     │
 │             │     │             │     │             │     │             │
-│ EventBridge │     │   Lambda    │     │   Lambda    │     │  Snowpipe   │
-│ API Gateway │     │   + SQS     │     │   + SQS     │     │  + Tasks    │
+│ EventBridge │     │   Lambda    │     │   Lambda    │     │   Lambda    │
+│ Step Funcs  │     │   GFN API   │     │   Soda QA   │     │    dlt      │
 └─────────────┘     └──────┬──────┘     └──────┬──────┘     └──────┬──────┘
                            │                   │                   │
                            ▼                   ▼                   ▼
                     ┌─────────────────────────────────────────────────────┐
                     │                    S3 DATA LAKE                      │
-                    │         raw/ ────────▶ transformed/ ────▶ Snowflake │
+                    │         raw/ ────────▶ staged/ ──────────▶ Snowflake │
                     └─────────────────────────────────────────────────────┘
+```
+
+### Alternative: Snowpipe for Streaming
+
+For near real-time streaming scenarios, see [docs/SNOWPIPE_SETUP.md](docs/SNOWPIPE_SETUP.md).
+
+```
+S3 (transformed/) → SNS → SQS → Snowpipe → Snowflake RAW schema
 ```
 
 ---
