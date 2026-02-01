@@ -390,6 +390,100 @@ Returns all countries and record types for a given year (~200 records per call).
 | `make aws-s3-ls` | List S3 bucket contents |
 | `make clean` | Clean generated files |
 | `make docker-down` | Stop LocalStack |
+| `make ci-lint` | Run CI lint job locally |
+| `make ci-test` | Run CI test job locally |
+| `make ci-all` | Run all CI jobs locally |
+
+---
+
+## CI/CD Pipeline
+
+The project includes a comprehensive GitHub Actions workflow for continuous integration and deployment.
+
+### Pipeline Stages
+
+| Stage | Trigger | Description |
+|-------|---------|-------------|
+| **Lint** | All pushes/PRs | Ruff linter, formatter, mypy type checking |
+| **Unit Tests** | All pushes/PRs | pytest with coverage (no external dependencies) |
+| **Integration Tests** | All pushes/PRs | LocalStack-based AWS integration tests |
+| **Security Scan** | All pushes/PRs | Bandit + TruffleHog secret detection |
+| **Data Quality** | Main branch only | Sample extraction + Soda validation |
+| **Deploy Staging** | Develop branch | Deploy to staging environment |
+| **Deploy Production** | Main branch | Deploy to production environment |
+
+### Testing GitHub Actions Locally
+
+Use [act](https://github.com/nektos/act) to run GitHub Actions workflows locally before pushing:
+
+```bash
+# Install act
+brew install act          # macOS
+# or: curl https://raw.githubusercontent.com/nektos/act/master/install.sh | sudo bash
+
+# Install GitHub CLI (for easy token generation)
+brew install gh           # macOS
+gh auth login             # Follow prompts to authenticate
+
+# Set GitHub token (required for uv setup action)
+export GITHUB_TOKEN=$(gh auth token)
+
+# Alternative: Create a Personal Access Token manually
+# 1. Go to https://github.com/settings/tokens
+# 2. Generate new token (classic) - no scopes needed for public repos
+# 3. export GITHUB_TOKEN=ghp_your_token_here
+
+# List available jobs
+make ci-list
+
+# Run specific jobs
+make ci-lint              # Run linting only
+make ci-test              # Run unit tests
+make ci-security          # Run security scan
+make ci-all               # Run all jobs
+
+# Dry run (see what would execute)
+make ci-dry-run
+```
+
+### Required Secrets
+
+Configure these secrets in GitHub repository settings:
+
+| Secret | Required For | Description |
+|--------|--------------|-------------|
+| `GFN_API_KEY` | Data quality checks | Global Footprint Network API key |
+| `AWS_ACCESS_KEY_ID` | Deployment | AWS credentials for staging/production |
+| `AWS_SECRET_ACCESS_KEY` | Deployment | AWS credentials for staging/production |
+| `SNOWFLAKE_ACCOUNT` | Production | Snowflake account identifier |
+| `SNOWFLAKE_USER` | Production | Snowflake username |
+| `SNOWFLAKE_PASSWORD` | Production | Snowflake password |
+
+### Local CI Testing with act
+
+```bash
+# Create a .secrets file for local testing (not committed to git)
+cat > .secrets << 'EOF'
+GITHUB_TOKEN=ghp_your_token_here
+GFN_API_KEY=your_api_key_here
+AWS_ACCESS_KEY_ID=test
+AWS_SECRET_ACCESS_KEY=test
+EOF
+
+# Or use GitHub CLI token
+echo "GITHUB_TOKEN=$(gh auth token)" >> .secrets
+
+# Run with secrets file
+act --secret-file .secrets --container-architecture linux/amd64
+
+# Run specific job
+act -j lint --secret-file .secrets --container-architecture linux/amd64
+
+# Run with verbose output
+act -v --secret-file .secrets --container-architecture linux/amd64
+```
+
+> **Note**: Integration tests with LocalStack may require Docker-in-Docker support. For best results, run integration tests directly with `make test-integration`.
 
 ---
 

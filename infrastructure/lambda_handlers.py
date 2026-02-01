@@ -19,13 +19,14 @@ Local testing:
     python -m infrastructure.lambda_handlers transform --s3-key raw/gfn_footprint_20240130_120000.json
     python -m infrastructure.lambda_handlers load --s3-key transformed/gfn_footprint_20240130_120000_transformed.json
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
-import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -38,7 +39,9 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 # Configuration
-LOCALSTACK_ENDPOINT = os.getenv("AWS_ENDPOINT_URL") or os.getenv("LOCALSTACK_ENDPOINT", "http://localhost:4566")
+LOCALSTACK_ENDPOINT = os.getenv("AWS_ENDPOINT_URL") or os.getenv(
+    "LOCALSTACK_ENDPOINT", "http://localhost:4566"
+)
 S3_BUCKET = os.getenv("S3_BUCKET", "gfn-data-lake")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 GFN_API_KEY = os.getenv("GFN_API_KEY")
@@ -101,13 +104,14 @@ def get_sfn_client():
 # EXTRACT LAMBDA - Uses Bulk API Endpoint
 # ============================================================================
 
+
 async def _discover_record_types(
     session: aiohttp.ClientSession,
     auth: aiohttp.BasicAuth,
 ) -> dict[str, str]:
     """
     Dynamically discover available record types from the API.
-    
+
     Uses the /data/all/{year} endpoint with a sample year to discover
     all available record types.
     """
@@ -139,7 +143,7 @@ async def _fetch_year_bulk(
 ) -> list[dict]:
     """
     Fetch ALL data for ALL countries for a single year using bulk endpoint.
-    
+
     This is ~200x more efficient than per-country fetching.
     """
     async with semaphore:
@@ -192,13 +196,13 @@ async def _fetch_year_bulk(
             except asyncio.TimeoutError:
                 logger.warning(f"Timeout for year {year}, attempt {attempt + 1}/3")
                 if attempt < 2:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
                     continue
                 return []
             except aiohttp.ClientError as e:
                 logger.warning(f"Error for year {year}: {e}")
                 if attempt < 2:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
                     continue
                 return []
 
@@ -208,7 +212,7 @@ async def _fetch_year_bulk(
 async def _extract_bulk(start_year: int, end_year: int) -> dict:
     """
     Extract all data from GFN API using bulk endpoint.
-    
+
     Uses /data/all/{year} which returns ALL countries × ALL record types
     for a year in a single API call.
     """
@@ -265,24 +269,26 @@ async def _extract_bulk(start_year: int, end_year: int) -> dict:
                 "end_year": end_year,
                 "total_records": len(all_records),
                 "unique_countries": len(set(r["country_code"] for r in all_records)),
-                "unique_record_types": len(set(r["record_type"] for r in all_records if r.get("record_type"))),
-            }
+                "unique_record_types": len(
+                    set(r["record_type"] for r in all_records if r.get("record_type"))
+                ),
+            },
         }
 
 
 def handler_extract(event: dict, context: Any = None) -> dict:
     """
     Lambda handler for extraction.
-    
+
     Uses the efficient bulk API endpoint /data/all/{year} which returns
     ALL countries × ALL record types in a single call.
-    
+
     Input event:
         {
             "start_year": 2010,
             "end_year": 2024
         }
-    
+
     Output (Step Functions compatible):
         {
             "status": "success",
@@ -341,11 +347,13 @@ def handler_extract(event: dict, context: Any = None) -> dict:
         queue_url = sqs.get_queue_url(QueueName="gfn-transform-queue")["QueueUrl"]
         sqs.send_message(
             QueueUrl=queue_url,
-            MessageBody=json.dumps({
-                "s3_bucket": S3_BUCKET,
-                "s3_key": s3_key,
-                "records_count": len(records),
-            }),
+            MessageBody=json.dumps(
+                {
+                    "s3_bucket": S3_BUCKET,
+                    "s3_key": s3_key,
+                    "records_count": len(records),
+                }
+            ),
         )
         logger.info("Sent message to transform queue")
     except Exception as e:
@@ -366,18 +374,19 @@ def handler_extract(event: dict, context: Any = None) -> dict:
 # TRANSFORM LAMBDA
 # ============================================================================
 
+
 def handler_transform(event: dict, context: Any = None) -> dict:
     """
     Lambda handler for transformation.
-    
+
     Validates, enriches, and deduplicates extracted data.
-    
+
     Input event (Step Functions or SQS):
         {
             "s3_bucket": "gfn-data-lake",
             "s3_key": "raw/footprint/2024/01/30/data.json"
         }
-    
+
     Output (Step Functions compatible):
         {
             "status": "success",
@@ -448,8 +457,10 @@ def handler_transform(event: dict, context: Any = None) -> dict:
 
         transformed.append(enriched)
 
-    logger.info(f"Transformed {len(transformed):,} records "
-                f"(removed {invalid_count} invalid, {len(footprint_data) - len(transformed) - invalid_count} duplicates)")
+    logger.info(
+        f"Transformed {len(transformed):,} records "
+        f"(removed {invalid_count} invalid, {len(footprint_data) - len(transformed) - invalid_count} duplicates)"
+    )
 
     # Build output data structure
     output_data = {
@@ -461,7 +472,7 @@ def handler_transform(event: dict, context: Any = None) -> dict:
             "records_transformed": len(transformed),
             "records_removed": len(footprint_data) - len(transformed),
             "transformed_at": datetime.now(timezone.utc).isoformat(),
-        }
+        },
     }
 
     # Save to transformed folder with simplified structure
@@ -487,11 +498,13 @@ def handler_transform(event: dict, context: Any = None) -> dict:
         queue_url = sqs.get_queue_url(QueueName="gfn-load-queue")["QueueUrl"]
         sqs.send_message(
             QueueUrl=queue_url,
-            MessageBody=json.dumps({
-                "s3_bucket": s3_bucket,
-                "s3_key": output_key,
-                "records_count": len(transformed),
-            }),
+            MessageBody=json.dumps(
+                {
+                    "s3_bucket": s3_bucket,
+                    "s3_key": output_key,
+                    "records_count": len(transformed),
+                }
+            ),
         )
         logger.info("Sent message to load queue")
     except Exception as e:
@@ -510,16 +523,17 @@ def handler_transform(event: dict, context: Any = None) -> dict:
 # LOAD LAMBDA
 # ============================================================================
 
+
 def handler_load(event: dict, context: Any = None) -> dict:
     """
     Lambda handler for loading to destination (Snowflake or DuckDB).
-    
+
     Input event (Step Functions or SQS):
         {
             "s3_bucket": "gfn-data-lake",
             "s3_key": "transformed/gfn_footprint_20240130_120000_transformed.json"
         }
-    
+
     Output (Step Functions compatible):
         {
             "status": "success",
@@ -615,34 +629,37 @@ def _load_to_duckdb_bulk(data: list[dict]) -> int:
 
     if data:
         # Use batch insert for efficiency
-        conn.executemany("""
+        conn.executemany(
+            """
             INSERT OR REPLACE INTO footprint_data VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
-        """, [
-            (
-                r.get("country_code"),
-                r.get("country_name"),
-                r.get("short_name"),
-                r.get("iso_alpha2"),
-                r.get("year"),
-                r.get("record_type"),
-                r.get("crop_land"),
-                r.get("grazing_land"),
-                r.get("forest_land"),
-                r.get("fishing_ground"),
-                r.get("builtup_land"),
-                r.get("carbon"),
-                r.get("value"),
-                r.get("score"),
-                r.get("carbon_pct_of_total"),
-                r.get("extracted_at"),
-                r.get("transformed_at"),
-            )
-            for r in data
-        ])
+        """,
+            [
+                (
+                    r.get("country_code"),
+                    r.get("country_name"),
+                    r.get("short_name"),
+                    r.get("iso_alpha2"),
+                    r.get("year"),
+                    r.get("record_type"),
+                    r.get("crop_land"),
+                    r.get("grazing_land"),
+                    r.get("forest_land"),
+                    r.get("fishing_ground"),
+                    r.get("builtup_land"),
+                    r.get("carbon"),
+                    r.get("value"),
+                    r.get("score"),
+                    r.get("carbon_pct_of_total"),
+                    r.get("extracted_at"),
+                    r.get("transformed_at"),
+                )
+                for r in data
+            ],
+        )
 
-    count = conn.execute("SELECT COUNT(*) FROM footprint_data").fetchone()[0]
+    conn.execute("SELECT COUNT(*) FROM footprint_data").fetchone()[0]
     conn.close()
 
     return len(data)
@@ -694,7 +711,8 @@ def _load_to_snowflake_bulk(data: list[dict]) -> int:
         """)
 
         # Batch insert using executemany
-        cursor.executemany("""
+        cursor.executemany(
+            """
             MERGE INTO FOOTPRINT_DATA_RAW t
             USING (SELECT %s as country_code, %s as year, %s as record_type) s
             ON t.country_code = s.country_code AND t.year = s.year AND t.record_type = s.record_type
@@ -709,24 +727,48 @@ def _load_to_snowflake_bulk(data: list[dict]) -> int:
                 crop_land, grazing_land, forest_land, fishing_ground, builtup_land, carbon,
                 value, score, carbon_pct_of_total, extracted_at, transformed_at
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """, [
-            (
-                r.get("country_code"), r.get("year"), r.get("record_type"),
-                r.get("country_name"), r.get("short_name"), r.get("iso_alpha2"),
-                r.get("crop_land"), r.get("grazing_land"), r.get("forest_land"),
-                r.get("fishing_ground"), r.get("builtup_land"), r.get("carbon"),
-                r.get("value"), r.get("score"), r.get("carbon_pct_of_total"),
-                r.get("extracted_at"), r.get("transformed_at"),
-                # Insert values
-                r.get("country_code"), r.get("country_name"), r.get("short_name"),
-                r.get("iso_alpha2"), r.get("year"), r.get("record_type"),
-                r.get("crop_land"), r.get("grazing_land"), r.get("forest_land"),
-                r.get("fishing_ground"), r.get("builtup_land"), r.get("carbon"),
-                r.get("value"), r.get("score"), r.get("carbon_pct_of_total"),
-                r.get("extracted_at"), r.get("transformed_at"),
-            )
-            for r in data
-        ])
+        """,
+            [
+                (
+                    r.get("country_code"),
+                    r.get("year"),
+                    r.get("record_type"),
+                    r.get("country_name"),
+                    r.get("short_name"),
+                    r.get("iso_alpha2"),
+                    r.get("crop_land"),
+                    r.get("grazing_land"),
+                    r.get("forest_land"),
+                    r.get("fishing_ground"),
+                    r.get("builtup_land"),
+                    r.get("carbon"),
+                    r.get("value"),
+                    r.get("score"),
+                    r.get("carbon_pct_of_total"),
+                    r.get("extracted_at"),
+                    r.get("transformed_at"),
+                    # Insert values
+                    r.get("country_code"),
+                    r.get("country_name"),
+                    r.get("short_name"),
+                    r.get("iso_alpha2"),
+                    r.get("year"),
+                    r.get("record_type"),
+                    r.get("crop_land"),
+                    r.get("grazing_land"),
+                    r.get("forest_land"),
+                    r.get("fishing_ground"),
+                    r.get("builtup_land"),
+                    r.get("carbon"),
+                    r.get("value"),
+                    r.get("score"),
+                    r.get("carbon_pct_of_total"),
+                    r.get("extracted_at"),
+                    r.get("transformed_at"),
+                )
+                for r in data
+            ],
+        )
 
         conn.commit()
         return len(data)
@@ -755,10 +797,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.handler == "extract":
-        result = handler_extract({
-            "start_year": args.start_year,
-            "end_year": args.end_year,
-        })
+        result = handler_extract(
+            {
+                "start_year": args.start_year,
+                "end_year": args.end_year,
+            }
+        )
     elif args.handler == "transform":
         if not args.s3_key:
             print("Error: --s3-key required for transform")

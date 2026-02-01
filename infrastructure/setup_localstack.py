@@ -11,10 +11,11 @@ Simulates the production AWS architecture locally:
 Usage:
     # Start LocalStack first
     docker-compose up -d
-    
+
     # Setup infrastructure
     python -m infrastructure.setup_localstack
 """
+
 import json
 import os
 import shutil
@@ -29,6 +30,7 @@ from botocore.config import Config
 # Try to load .env file
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
@@ -108,7 +110,7 @@ def setup_sqs():
     sqs = get_client("sqs")
 
     # Create DLQ first
-    dlq_response = sqs.create_queue(
+    sqs.create_queue(
         QueueName=SQS_DLQ,
         Attributes={
             "MessageRetentionPeriod": "1209600",  # 14 days
@@ -118,10 +120,12 @@ def setup_sqs():
     print(f"✓ Created DLQ: {SQS_DLQ}")
 
     # Redrive policy for main queues
-    redrive_policy = json.dumps({
-        "deadLetterTargetArn": dlq_arn,
-        "maxReceiveCount": 3,
-    })
+    redrive_policy = json.dumps(
+        {
+            "deadLetterTargetArn": dlq_arn,
+            "maxReceiveCount": 3,
+        }
+    )
 
     # Create processing queues
     queues = [SQS_EXTRACT_QUEUE, SQS_TRANSFORM_QUEUE, SQS_LOAD_QUEUE]
@@ -176,12 +180,14 @@ def setup_eventbridge():
             {
                 "Id": "extract-queue-target",
                 "Arn": f"arn:aws:sqs:{AWS_REGION}:{AWS_ACCOUNT_ID}:{SQS_EXTRACT_QUEUE}",
-                "Input": json.dumps({
-                    "action": "extract",
-                    "start_year": 2010,
-                    "end_year": 2024,
-                    "incremental": True,
-                }),
+                "Input": json.dumps(
+                    {
+                        "action": "extract",
+                        "start_year": 2010,
+                        "end_year": 2024,
+                        "incremental": True,
+                    }
+                ),
             }
         ],
     )
@@ -275,11 +281,11 @@ def setup_iam_role():
 def create_lambda_package(include_dependencies: bool = True) -> str:
     """
     Create a deployment package (ZIP) for Lambda functions.
-    
+
     Args:
         include_dependencies: If True, install and bundle pip dependencies.
                             This creates a larger package but works in isolated Lambda.
-    
+
     Returns the path to the ZIP file.
     """
     project_root = Path(__file__).parent.parent
@@ -582,7 +588,9 @@ def setup_cloudwatch():
         )
         print("✓ Created CloudWatch alarm for DLQ")
     except Exception as e:
-        print(f"  Skipping CloudWatch alarm (not fully supported in LocalStack Community): {type(e).__name__}")
+        print(
+            f"  Skipping CloudWatch alarm (not fully supported in LocalStack Community): {type(e).__name__}"
+        )
 
 
 def print_summary():
@@ -595,27 +603,27 @@ Resources Created:
   S3:
     - s3://{S3_BUCKET}/raw/
     - s3://{S3_BUCKET}/transformed/
-  
+
   SQS:
     - {SQS_EXTRACT_QUEUE} (triggers extraction)
     - {SQS_TRANSFORM_QUEUE} (triggers transformation)
     - {SQS_LOAD_QUEUE} (triggers loading)
     - {SQS_DLQ} (failed messages)
-  
+
   SNS:
     - {SNS_NOTIFICATIONS} (pipeline notifications)
-  
+
   Lambda Functions:
     - gfn-extract (Extract data from GFN API)
     - gfn-transform (Transform and validate raw data)
     - gfn-load (Load processed data to Snowflake)
-  
+
   EventBridge:
     - gfn-daily-extraction (cron: 0 6 * * ? *)
-  
+
   Step Functions:
     - gfn-pipeline-orchestrator (ETL orchestration)
-  
+
   CloudWatch:
     - Log groups for each Lambda
     - Alarm for DLQ messages
@@ -625,11 +633,11 @@ Endpoint: {LOCALSTACK_ENDPOINT}
 Test Commands:
   # List Lambda functions
   uv run awslocal lambda list-functions
-  
+
   # Invoke extract Lambda
   uv run awslocal lambda invoke --function-name gfn-extract \\
     --payload '{{"start_year": 2023}}' output.json
-  
+
   # Check S3 bucket
   uv run awslocal s3 ls s3://{S3_BUCKET}/ --recursive
 """)
@@ -667,18 +675,18 @@ def main():
     print("Setting up LocalStack infrastructure...\n")
 
     # Core infrastructure
-    setup_s3()                    # Create bucket and folders
-    setup_sqs()                   # Create queues (needed for S3 notifications)
-    setup_s3_notifications()      # Configure S3 -> SQS triggers
+    setup_s3()  # Create bucket and folders
+    setup_sqs()  # Create queues (needed for S3 notifications)
+    setup_s3_notifications()  # Configure S3 -> SQS triggers
     setup_sns()
     setup_eventbridge()
     setup_cloudwatch()
 
     # Lambda deployment
     print("\nDeploying Lambda functions...")
-    role_arn = setup_iam_role()   # Create execution role
+    role_arn = setup_iam_role()  # Create execution role
     setup_lambda_functions(role_arn)  # Deploy Lambda code
-    setup_lambda_triggers()       # Configure SQS -> Lambda triggers
+    setup_lambda_triggers()  # Configure SQS -> Lambda triggers
 
     # Orchestration
     setup_step_functions()

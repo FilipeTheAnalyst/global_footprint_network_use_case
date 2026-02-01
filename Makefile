@@ -87,6 +87,16 @@ help:
 	@echo "║    make clean                  Clean generated files                          ║"
 	@echo "║    make logs                   View pipeline logs                             ║"
 	@echo "║                                                                               ║"
+	@echo "║  CI/CD LOCAL TESTING (requires: brew install act)                             ║"
+	@echo "║  ──────────────────────────────────────────────────────────────────────────── ║"
+	@echo "║    make ci-lint                Run CI lint job locally                        ║"
+	@echo "║    make ci-test                Run CI test job locally                        ║"
+	@echo "║    make ci-integration         Run CI integration tests locally               ║"
+	@echo "║    make ci-security            Run CI security scan locally                   ║"
+	@echo "║    make ci-all                 Run all CI jobs locally                        ║"
+	@echo "║    make ci-list                List available CI jobs                         ║"
+	@echo "║    make ci-dry-run             Dry run (show what would execute)              ║"
+	@echo "║                                                                               ║"
 	@echo "╚══════════════════════════════════════════════════════════════════════════════╝"
 
 # =============================================================================
@@ -477,3 +487,52 @@ sync-to-aws:
 	@aws s3 sync /tmp/gfn-sync/transformed/ s3://${S3_BUCKET}/transformed/
 	@rm -rf /tmp/gfn-sync
 	@echo "✓ Sync complete. Snowpipe should pick up new files."
+
+# =============================================================================
+# CI/CD LOCAL TESTING (GitHub Actions with act)
+# =============================================================================
+
+# Install act (GitHub Actions local runner)
+# macOS: brew install act
+# Linux: curl https://raw.githubusercontent.com/nektos/act/master/install.sh | sudo bash
+
+# Note: Requires GITHUB_TOKEN for uv setup action
+# Generate a token at: https://github.com/settings/tokens (no scopes needed for public repos)
+# Or use: export GITHUB_TOKEN=$(gh auth token)
+
+ci-lint:
+	@echo "Running lint job locally with act..."
+	act -j lint --container-architecture linux/amd64 \
+		--secret GITHUB_TOKEN=${GITHUB_TOKEN}
+
+ci-test:
+	@echo "Running test job locally with act..."
+	act -j test --container-architecture linux/amd64 \
+		--secret GITHUB_TOKEN=${GITHUB_TOKEN} \
+		--secret GFN_API_KEY=${GFN_API_KEY}
+
+ci-integration:
+	@echo "Running integration-test job locally with act..."
+	@echo "Note: This requires Docker-in-Docker support"
+	act -j integration-test --container-architecture linux/amd64 \
+		--secret GITHUB_TOKEN=${GITHUB_TOKEN} \
+		--secret GFN_API_KEY=${GFN_API_KEY}
+
+ci-security:
+	@echo "Running security-scan job locally with act..."
+	act -j security-scan --container-architecture linux/amd64 \
+		--secret GITHUB_TOKEN=${GITHUB_TOKEN}
+
+ci-all:
+	@echo "Running all CI jobs locally with act..."
+	act --container-architecture linux/amd64 \
+		--secret GITHUB_TOKEN=${GITHUB_TOKEN} \
+		--secret GFN_API_KEY=${GFN_API_KEY}
+
+ci-list:
+	@echo "Listing available GitHub Actions jobs..."
+	act -l
+
+ci-dry-run:
+	@echo "Dry run of GitHub Actions workflow..."
+	act -n

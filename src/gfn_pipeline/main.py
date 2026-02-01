@@ -21,7 +21,7 @@ Usage:
     python -m gfn_pipeline.main --destination snowflake
     python -m gfn_pipeline.main --destination both --with-contracts
     python -m gfn_pipeline.main --with-soda  # Enable Soda checks
-    
+
 Environment Variables:
     GFN_API_KEY: API key for Global Footprint Network
     PIPELINE_DESTINATION: Default destination (duckdb, snowflake, both)
@@ -29,6 +29,7 @@ Environment Variables:
     AWS_ENDPOINT_URL: LocalStack endpoint (optional)
     SODA_ENABLED: Enable Soda checks (default: false)
 """
+
 from __future__ import annotations
 
 import argparse
@@ -44,7 +45,6 @@ from typing import Any, Iterator
 
 import dlt
 from dlt.common.schema.typing import TColumnSchema
-from dlt.sources.helpers import requests
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -58,8 +58,7 @@ logging.basicConfig(
 logger = logging.getLogger("gfn_pipeline")
 
 # Import validators (Soda checks defined in soda/staging_checks.yml)
-from gfn_pipeline.validators import SodaStagingValidator, SodaCheckResult
-
+from gfn_pipeline.validators import SodaStagingValidator  # noqa: E402
 
 # =============================================================================
 # Data Contracts - Schema Definitions with Evolution Support
@@ -106,6 +105,7 @@ COUNTRIES_COLUMNS: dict[str, TColumnSchema] = {
 # =============================================================================
 # S3 Data Lake Layer
 # =============================================================================
+
 
 class S3DataLake:
     """S3 Data Lake for raw and staged data storage."""
@@ -186,6 +186,7 @@ class S3DataLake:
 # dlt Source with S3 Integration
 # =============================================================================
 
+
 @dlt.source(name="gfn_s3", max_table_nesting=0)
 def gfn_s3_source(
     data: dict[str, Any],
@@ -194,7 +195,7 @@ def gfn_s3_source(
 ):
     """
     dlt source that reads from staged S3 data.
-    
+
     Args:
         data: Pre-extracted data dict with 'countries' and 'footprint_data'
         incremental_key: Column to use for incremental loading
@@ -223,14 +224,14 @@ def countries_resource(
 ) -> Iterator[dict]:
     """
     Countries reference data with schema evolution support.
-    
+
     Schema Evolution:
     - New columns from API are automatically added
     - Existing columns maintain their types
     - Data contracts enforce required fields when enabled
     """
     logger.info(f"Processing {len(countries)} countries")
-    
+
     for country in countries:
         # Always validate required fields (schema has nullable: False)
         if not country.get("country_code"):
@@ -239,7 +240,7 @@ def countries_resource(
         if not country.get("country_name"):
             logger.warning(f"Skipping country without name: {country}")
             continue
-        
+
         yield country
 
 
@@ -256,26 +257,28 @@ def footprint_data_resource(
 ) -> Iterator[dict]:
     """
     Footprint data with incremental loading and schema evolution.
-    
+
     Incremental Loading Strategy:
     - Uses 'year' as incremental key by default
     - dlt tracks last processed year in state
     - Only new/updated records are processed on subsequent runs
-    
+
     Schema Evolution:
     - New metrics from API are automatically added as columns
     - Type changes are handled gracefully
     - Data contracts can enforce required fields
     """
     logger.info(f"Processing {len(data):,} footprint records")
-    
+
     for record in data:
         # Always validate required fields (schema has nullable: False for these)
         required = ["country_code", "year", "record_type"]
         if not all(record.get(f) for f in required):
-            logger.warning(f"Skipping invalid record: {record.get('country_code')}/{record.get('year')}")
+            logger.warning(
+                f"Skipping invalid record: {record.get('country_code')}/{record.get('year')}"
+            )
             continue
-        
+
         yield record
 
 
@@ -283,10 +286,11 @@ def footprint_data_resource(
 # Incremental State Management
 # =============================================================================
 
+
 def get_incremental_state(pipeline: dlt.Pipeline) -> dict:
     """
     Get incremental loading state from dlt pipeline.
-    
+
     Returns:
         Dict with last processed values for incremental columns
     """
@@ -308,12 +312,12 @@ def calculate_incremental_range(
 ) -> tuple[int, int]:
     """
     Calculate actual year range based on incremental state.
-    
+
     Strategy:
     - If force_full: Use requested range
     - If state exists: Start from last_year + 1
     - Otherwise: Use requested range
-    
+
     Returns:
         Tuple of (start_year, end_year)
     """
@@ -329,8 +333,7 @@ def calculate_incremental_range(
         # Include last year to catch any updates
         incremental_start = max(last_year - 1, requested_start)
         logger.info(
-            f"Incremental load: {incremental_start}-{requested_end} "
-            f"(last processed: {last_year})"
+            f"Incremental load: {incremental_start}-{requested_end} (last processed: {last_year})"
         )
         return incremental_start, requested_end
 
@@ -342,10 +345,11 @@ def calculate_incremental_range(
 # Pipeline Runner with dlt + S3
 # =============================================================================
 
+
 class DltPipelineRunner:
     """
     Production pipeline runner combining dlt features with S3 data lake.
-    
+
     Features:
     - S3 raw storage for audit trail
     - S3 staged storage for replay capability
@@ -383,10 +387,14 @@ class DltPipelineRunner:
         self.data_lake = S3DataLake(use_localstack=use_localstack) if use_s3 else None
 
         # Initialize Soda validator
-        self.soda_validator = SodaStagingValidator(
-            fail_on_error=not soda_warn_only,
-            warn_only=soda_warn_only,
-        ) if enable_soda else None
+        self.soda_validator = (
+            SodaStagingValidator(
+                fail_on_error=not soda_warn_only,
+                warn_only=soda_warn_only,
+            )
+            if enable_soda
+            else None
+        )
 
         # Initialize dlt pipeline(s)
         self.pipelines = self._init_pipelines()
@@ -408,10 +416,7 @@ class DltPipelineRunner:
         """Initialize dlt pipelines for each destination."""
         pipelines = {}
 
-        destinations = (
-            ["duckdb", "snowflake"] if self.destination == "both"
-            else [self.destination]
-        )
+        destinations = ["duckdb", "snowflake"] if self.destination == "both" else [self.destination]
 
         for dest in destinations:
             pipeline_name = f"gfn_{dest}"
@@ -435,16 +440,16 @@ class DltPipelineRunner:
         """Execute the full pipeline with dlt + S3."""
         self.metrics["start_time"] = datetime.now(timezone.utc).isoformat()
 
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print("GFN Pipeline - dlt + S3 Data Lake")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         print(f"Destination:      {self.destination}")
         print(f"Years:            {self.start_year}-{self.end_year}")
         print(f"S3 Storage:       {'Enabled' if self.use_s3 else 'Disabled'}")
         print(f"Data Contracts:   {'Enabled' if self.enable_contracts else 'Disabled'}")
         print(f"Soda Checks:      {'Enabled' if self.enable_soda else 'Disabled'}")
         print(f"Mode:             {'Full Refresh' if self.full_refresh else 'Incremental'}")
-        print(f"{'='*70}\n")
+        print(f"{'=' * 70}\n")
 
         try:
             # Step 1: Calculate incremental range
@@ -492,8 +497,10 @@ class DltPipelineRunner:
                     "duration_seconds": soda_result.duration_seconds,
                 }
                 status_icon = "✓" if soda_result.passed else "✗"
-                print(f"  {status_icon} {soda_result.checks_passed}/{soda_result.checks_run} checks passed")
-                
+                print(
+                    f"  {status_icon} {soda_result.checks_passed}/{soda_result.checks_run} checks passed"
+                )
+
                 if not soda_result.passed and not self.soda_warn_only:
                     return self._finalize("soda_failed")
 
@@ -595,9 +602,7 @@ class DltPipelineRunner:
         elapsed = time.monotonic() - start_time
 
         # Extract results
-        loaded_count = sum(
-            len(pkg.jobs) for pkg in load_info.load_packages
-        ) if load_info.load_packages else 0
+        (sum(len(pkg.jobs) for pkg in load_info.load_packages) if load_info.load_packages else 0)
 
         # Check for schema changes
         schema_changes = self._detect_schema_changes(pipeline)
@@ -648,7 +653,7 @@ class DltPipelineRunner:
             end = datetime.fromisoformat(self.metrics["end_time"].replace("Z", "+00:00"))
             self.metrics["duration_seconds"] = (end - start).total_seconds()
 
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         status_text = {
             "success": "COMPLETE",
             "failed": "FAILED",
@@ -656,7 +661,7 @@ class DltPipelineRunner:
             "no_data": "COMPLETE (no data)",
         }.get(status, status.upper())
         print(f"PIPELINE {status_text}")
-        print(f"{'='*70}")
+        print(f"{'=' * 70}")
         print(f"Status:           {status}")
         print(f"Duration:         {self.metrics.get('duration_seconds', 0):.1f}s")
         print(f"Records:          {self.metrics['records_extracted']:,} extracted")
@@ -680,7 +685,7 @@ class DltPipelineRunner:
             print(f"Schema Changes:   {self.metrics['schema_changes']}")
         if self.metrics["errors"]:
             print(f"Errors:           {self.metrics['errors']}")
-        print(f"{'='*70}\n")
+        print(f"{'=' * 70}\n")
 
         return self.metrics
 
@@ -688,6 +693,7 @@ class DltPipelineRunner:
 # =============================================================================
 # CLI
 # =============================================================================
+
 
 def main():
     """Main entry point."""
@@ -697,9 +703,9 @@ def main():
         epilog="""
 Architecture:
   This pipeline combines dlt's powerful features with S3 data lake storage:
-  
+
   Extract (async) → S3 Raw → Soda Checks → S3 Staged → dlt → Destination
-  
+
   Benefits:
   - Schema Evolution: New API fields automatically become columns
   - Incremental Loads: Only process new/changed data
@@ -711,28 +717,29 @@ Architecture:
 Examples:
   # Standard run (incremental, DuckDB)
   python -m gfn_pipeline.main
-  
+
   # Full refresh to Snowflake
   python -m gfn_pipeline.main -d snowflake --full-refresh
-  
+
   # Both destinations with data contracts
   python -m gfn_pipeline.main -d both --with-contracts
-  
+
   # Enable Soda data quality checks
   python -m gfn_pipeline.main --with-soda
-  
+
   # Soda checks in warn-only mode (don't fail pipeline)
   python -m gfn_pipeline.main --with-soda --soda-warn-only
-  
+
   # Specific year range
   python -m gfn_pipeline.main --start-year 2020 --end-year 2024
-  
+
   # Without S3 (direct to destination)
   python -m gfn_pipeline.main --no-s3
         """,
     )
     parser.add_argument(
-        "--destination", "-d",
+        "--destination",
+        "-d",
         choices=["duckdb", "snowflake", "both"],
         default=os.getenv("PIPELINE_DESTINATION", "duckdb"),
         help="Target destination(s)",

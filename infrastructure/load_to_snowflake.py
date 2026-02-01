@@ -8,10 +8,11 @@ internal stage, then loads it into the target table.
 Usage:
     # Load latest transformed file
     uv run python -m infrastructure.load_to_snowflake
-    
+
     # Load specific file
     uv run python -m infrastructure.load_to_snowflake --file transformed/gfn_footprint_20260131_030733_transformed.json
 """
+
 import argparse
 import os
 import tempfile
@@ -23,12 +24,14 @@ from botocore.config import Config
 # Try to load .env
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
 
 try:
     import snowflake.connector
+
     HAS_SNOWFLAKE = True
 except ImportError:
     HAS_SNOWFLAKE = False
@@ -75,10 +78,7 @@ def list_processed_files():
     """List all transformed JSON files in LocalStack S3."""
     s3 = get_s3_client()
 
-    response = s3.list_objects_v2(
-        Bucket=S3_BUCKET,
-        Prefix="transformed/"
-    )
+    response = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix="transformed/")
 
     files = []
     for obj in response.get("Contents", []):
@@ -120,7 +120,7 @@ def load_to_snowflake(local_path: str, source_file: str):
             extracted_at, _source_file
         )
         FROM (
-            SELECT 
+            SELECT
                 $1:country_code::INTEGER,
                 $1:country_name::VARCHAR,
                 $1:iso_alpha2::VARCHAR,
