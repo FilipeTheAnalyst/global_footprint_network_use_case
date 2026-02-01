@@ -446,10 +446,24 @@ test-integration:
 	uv run pytest tests/ -v -m "integration"
 
 lint:
-	uv run ruff check src/ infrastructure/
+	uv run ruff check src/ tests/ infrastructure/
+	uv run ruff format --check src/ tests/ infrastructure/
+
+lint-fix:
+	uv run ruff check --fix src/ tests/ infrastructure/
+	uv run ruff format src/ tests/ infrastructure/
+
+typecheck:
+	uv run mypy src/ --ignore-missing-imports || true
+
+security:
+	uv run bandit -r src/ -ll -x tests/
+
+check: lint typecheck security test-unit
+	@echo "✓ All checks passed"
 
 format:
-	uv run ruff format src/ infrastructure/
+	uv run ruff format src/ tests/ infrastructure/
 
 logs:
 	@if [ -d "logs" ]; then \

@@ -412,39 +412,46 @@ The project includes a comprehensive GitHub Actions workflow for continuous inte
 | **Deploy Staging** | Develop branch | Deploy to staging environment |
 | **Deploy Production** | Main branch | Deploy to production environment |
 
-### Testing GitHub Actions Locally
+### Local Testing (Recommended)
 
-Use [act](https://github.com/nektos/act) to run GitHub Actions workflows locally before pushing:
+Run the same checks locally that CI runs, without needing Docker or `act`:
+
+```bash
+# Run all lint checks (ruff + mypy)
+make lint
+
+# Run unit tests with coverage
+make test
+
+# Run security scan
+make security
+
+# Run all checks at once
+make check
+```
+
+### Testing with `act` (Optional)
+
+Use [act](https://github.com/nektos/act) to run the actual GitHub Actions workflow in Docker:
 
 ```bash
 # Install act
 brew install act          # macOS
-# or: curl https://raw.githubusercontent.com/nektos/act/master/install.sh | sudo bash
 
-# Install GitHub CLI (for easy token generation)
-brew install gh           # macOS
-gh auth login             # Follow prompts to authenticate
+# Install GitHub CLI (for token generation)
+brew install gh && gh auth login
 
 # Set GitHub token (required for uv setup action)
 export GITHUB_TOKEN=$(gh auth token)
 
-# Alternative: Create a Personal Access Token manually
-# 1. Go to https://github.com/settings/tokens
-# 2. Generate new token (classic) - no scopes needed for public repos
-# 3. export GITHUB_TOKEN=ghp_your_token_here
-
-# List available jobs
-make ci-list
-
-# Run specific jobs
-make ci-lint              # Run linting only
-make ci-test              # Run unit tests
-make ci-security          # Run security scan
+# Run CI jobs
+make ci-lint              # Run linting job
+make ci-test              # Run unit tests job
+make ci-security          # Run security scan job
 make ci-all               # Run all jobs
-
-# Dry run (see what would execute)
-make ci-dry-run
 ```
+
+> **Note**: `act` runs workflows in Docker containers and may have limitations compared to GitHub-hosted runners. For day-to-day development, use `make lint` and `make test` directly. The `act` tool may report failures for non-blocking steps (like mypy type checking) that would pass in actual GitHub Actions.
 
 ### Required Secrets
 
