@@ -35,7 +35,7 @@ cd global_footprint_network_use_case
 
 # Install dependencies
 make install
-# or: uv sync
+# or directly: uv sync
 ```
 
 ### Configuration

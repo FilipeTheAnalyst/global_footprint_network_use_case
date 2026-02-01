@@ -516,14 +516,13 @@ def countries_resource(
     logger.info(f"Processing {len(countries)} countries")
     
     for country in countries:
-        # Validate required fields if contracts enabled
-        if enable_contracts:
-            if not country.get("country_code"):
-                logger.warning(f"Skipping country without code: {country}")
-                continue
-            if not country.get("country_name"):
-                logger.warning(f"Skipping country without name: {country}")
-                continue
+        # Always validate required fields (schema has nullable: False)
+        if not country.get("country_code"):
+            logger.warning(f"Skipping country without code: {country}")
+            continue
+        if not country.get("country_name"):
+            logger.warning(f"Skipping country without name: {country}")
+            continue
         
         yield country
 
@@ -555,12 +554,11 @@ def footprint_data_resource(
     logger.info(f"Processing {len(data):,} footprint records")
     
     for record in data:
-        # Validate required fields if contracts enabled
-        if enable_contracts:
-            required = ["country_code", "year", "record_type"]
-            if not all(record.get(f) for f in required):
-                logger.warning(f"Skipping invalid record: {record.get('country_code')}/{record.get('year')}")
-                continue
+        # Always validate required fields (schema has nullable: False for these)
+        required = ["country_code", "year", "record_type"]
+        if not all(record.get(f) for f in required):
+            logger.warning(f"Skipping invalid record: {record.get('country_code')}/{record.get('year')}")
+            continue
         
         yield record
 
@@ -882,7 +880,7 @@ class DltPipelineRunner:
 
         # Extract results
         loaded_count = sum(
-            pkg.jobs_count for pkg in load_info.load_packages
+            len(pkg.jobs) for pkg in load_info.load_packages
         ) if load_info.load_packages else 0
 
         # Check for schema changes

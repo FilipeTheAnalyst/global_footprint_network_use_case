@@ -126,6 +126,11 @@ docker-build:
 # LOCAL DEVELOPMENT
 # =============================================================================
 
+install:
+	@echo "Installing dependencies..."
+	uv sync
+	@echo "✓ Dependencies installed"
+
 localstack-up: docker-up
 
 localstack-down:
@@ -363,44 +368,44 @@ soda-check:
 # =============================================================================
 
 aws-s3-ls:
-	uv run awslocal s3 ls s3://gfn-data-lake/ --recursive
+	@uv run python -c "import boto3; s3 = boto3.client('s3', endpoint_url='http://localhost:4566', region_name='us-east-1', aws_access_key_id='test', aws_secret_access_key='test'); response = s3.list_objects_v2(Bucket='gfn-data-lake'); print('S3 Contents:'); [print(f\"  {obj['LastModified'].strftime('%Y-%m-%d %H:%M')} {obj['Size']:>10} {obj['Key']}\") for obj in response.get('Contents', [])]"
 
 aws-s3-raw:
-	uv run awslocal s3 ls s3://gfn-data-lake/raw/ --recursive
+	@uv run python -c "import boto3; s3 = boto3.client('s3', endpoint_url='http://localhost:4566', region_name='us-east-1', aws_access_key_id='test', aws_secret_access_key='test'); response = s3.list_objects_v2(Bucket='gfn-data-lake', Prefix='raw/'); print('Raw files:'); [print(f\"  {obj['LastModified'].strftime('%Y-%m-%d %H:%M')} {obj['Size']:>10} {obj['Key']}\") for obj in response.get('Contents', [])]"
 
 aws-s3-staged:
-	uv run awslocal s3 ls s3://gfn-data-lake/staged/ --recursive
+	@uv run python -c "import boto3; s3 = boto3.client('s3', endpoint_url='http://localhost:4566', region_name='us-east-1', aws_access_key_id='test', aws_secret_access_key='test'); response = s3.list_objects_v2(Bucket='gfn-data-lake', Prefix='staged/'); print('Staged files:'); [print(f\"  {obj['LastModified'].strftime('%Y-%m-%d %H:%M')} {obj['Size']:>10} {obj['Key']}\") for obj in response.get('Contents', [])]"
 
 aws-s3-transformed:
-	uv run awslocal s3 ls s3://gfn-data-lake/transformed/ --recursive
+	@uv run python -c "import boto3; s3 = boto3.client('s3', endpoint_url='http://localhost:4566', region_name='us-east-1', aws_access_key_id='test', aws_secret_access_key='test'); response = s3.list_objects_v2(Bucket='gfn-data-lake', Prefix='transformed/'); print('Transformed files:'); [print(f\"  {obj['LastModified'].strftime('%Y-%m-%d %H:%M')} {obj['Size']:>10} {obj['Key']}\") for obj in response.get('Contents', [])]"
 
 aws-sqs-ls:
-	uv run awslocal sqs list-queues
+	@uv run python -c "import boto3; sqs = boto3.client('sqs', endpoint_url='http://localhost:4566', region_name='us-east-1', aws_access_key_id='test', aws_secret_access_key='test'); response = sqs.list_queues(); print('SQS Queues:'); [print(f'  {url}') for url in response.get('QueueUrls', [])]"
 
 aws-sqs-dlq:
 	@echo "Checking DLQ for failed messages..."
-	uv run awslocal sqs receive-message --queue-url http://localhost:4566/000000000000/gfn-dlq
+	@uv run python -c "import boto3; sqs = boto3.client('sqs', endpoint_url='http://localhost:4566', region_name='us-east-1', aws_access_key_id='test', aws_secret_access_key='test'); response = sqs.receive_message(QueueUrl='http://localhost:4566/000000000000/gfn-dlq', MaxNumberOfMessages=10); msgs = response.get('Messages', []); print(f'DLQ Messages: {len(msgs)}')"
 
 aws-logs:
-	uv run awslocal logs describe-log-groups
+	@uv run python -c "import boto3; logs = boto3.client('logs', endpoint_url='http://localhost:4566', region_name='us-east-1', aws_access_key_id='test', aws_secret_access_key='test'); response = logs.describe_log_groups(); print('Log Groups:'); [print(f\"  {g['logGroupName']}\") for g in response.get('logGroups', [])]"
 
 aws-events:
-	uv run awslocal events list-rules
+	@uv run python -c "import boto3; events = boto3.client('events', endpoint_url='http://localhost:4566', region_name='us-east-1', aws_access_key_id='test', aws_secret_access_key='test'); response = events.list_rules(); print('EventBridge Rules:'); [print(f\"  {r['Name']}: {r.get('ScheduleExpression', 'N/A')}\") for r in response.get('Rules', [])]"
 
 # =============================================================================
 # DUCKDB
 # =============================================================================
 
 duckdb-query:
-	@echo "Opening DuckDB CLI..."
-	uv run python -c "import duckdb; conn = duckdb.connect('gfn.duckdb'); print(conn.execute('SELECT COUNT(*) as records, COUNT(DISTINCT country_code) as countries FROM footprint_data').fetchdf())"
+	@echo "Querying DuckDB..."
+	uv run python -c "import duckdb; conn = duckdb.connect('gfn_duckdb.duckdb'); print(conn.execute('SELECT COUNT(*) as records, COUNT(DISTINCT country_code) as countries FROM gfn.footprint_data').fetchdf())"
 
 duckdb-summary:
 	@uv run python -c "\
 import duckdb; \
-conn = duckdb.connect('gfn.duckdb', read_only=True); \
+conn = duckdb.connect('gfn_duckdb.duckdb', read_only=True); \
 print('\\n=== DuckDB Summary ==='); \
-r = conn.execute('SELECT COUNT(*) as records, COUNT(DISTINCT country_code) as countries, COUNT(DISTINCT year) as years, MIN(year) as min_year, MAX(year) as max_year FROM footprint_data').fetchone(); \
+r = conn.execute('SELECT COUNT(*) as records, COUNT(DISTINCT country_code) as countries, COUNT(DISTINCT year) as years, MIN(year) as min_year, MAX(year) as max_year FROM gfn.footprint_data').fetchone(); \
 print(f'Records: {r[0]}'); \
 print(f'Countries: {r[1]}'); \
 print(f'Years: {r[3]}-{r[4]} ({r[2]} unique)'); \
@@ -409,8 +414,8 @@ print(f'Years: {r[3]}-{r[4]} ({r[2]} unique)'); \
 duckdb-top-emitters:
 	@uv run python -c "\
 import duckdb; \
-conn = duckdb.connect('gfn.duckdb', read_only=True); \
-print(conn.execute('SELECT country_name, year, ROUND(carbon/1e6, 2) as carbon_million_gha FROM footprint_data WHERE year = 2024 AND record_type LIKE \"%Carbon%\" ORDER BY carbon DESC NULLS LAST LIMIT 10').fetchdf().to_string()); \
+conn = duckdb.connect('gfn_duckdb.duckdb', read_only=True); \
+print(conn.execute('SELECT country_name, year, ROUND(value/1e6, 2) as value_million FROM gfn.footprint_data WHERE year = 2023 AND record_type = \\'EFConsTotGHA\\' ORDER BY value DESC NULLS LAST LIMIT 10').fetchdf().to_string()); \
 "
 
 # =============================================================================

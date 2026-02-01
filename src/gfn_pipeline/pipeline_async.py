@@ -258,19 +258,28 @@ async def fetch_countries(
         countries = await resp.json()
 
         extracted_at = datetime.now(timezone.utc).isoformat()
-        return [
-            {
-                "country_code": c.get("countryCode"),
-                "country_name": c.get("countryName"),
+        result = []
+        for c in countries:
+            country_code = c.get("countryCode")
+            country_name = c.get("countryName")
+            # Skip if missing required fields or if country_code is not numeric
+            if not country_code or not country_name:
+                continue
+            try:
+                country_code_int = int(country_code)
+            except (ValueError, TypeError):
+                # Skip non-numeric country codes (e.g., 'all', 'world')
+                continue
+            result.append({
+                "country_code": country_code_int,
+                "country_name": country_name,
                 "short_name": c.get("shortName"),
                 "iso_alpha2": c.get("isoa2"),
                 "version": c.get("version"),
                 "score": c.get("score"),
                 "extracted_at": extracted_at,
-            }
-            for c in countries
-            if c.get("countryCode") is not None and c.get("countryName")
-        ]
+            })
+        return result
 
 
 async def fetch_year_all_data(
@@ -311,9 +320,18 @@ async def fetch_year_all_data(
 
                 extracted_at = datetime.now(timezone.utc).isoformat()
 
+                def parse_country_code(code):
+                    """Safely parse country code to int."""
+                    if not code:
+                        return None
+                    try:
+                        return int(code)
+                    except (ValueError, TypeError):
+                        return None
+
                 return [
                     {
-                        "country_code": r.get("countryCode"),
+                        "country_code": parse_country_code(r.get("countryCode")),
                         "country_name": r.get("countryName"),
                         "short_name": r.get("shortName"),
                         "iso_alpha2": r.get("isoa2"),
@@ -335,7 +353,7 @@ async def fetch_year_all_data(
                         "extracted_at": extracted_at,
                     }
                     for r in records
-                    if r.get("year") and r.get("countryCode")
+                    if r.get("year") and parse_country_code(r.get("countryCode")) is not None
                 ]
 
         except asyncio.TimeoutError:
