@@ -580,6 +580,34 @@ For detailed architecture documentation including Terraform vs CloudFormation co
 - Native AWS/Snowflake integration
 - Enterprise-scale throughput
 
+### Pipeline Implementation Details
+
+The project uses two separate dlt source implementations, each optimized for its use case:
+
+| Aspect | `main.py` (S3 Flow) | `pipeline_async.py` (Direct Flow) |
+|--------|---------------------|-----------------------------------|
+| **dlt Source** | `gfn_s3_source` | `gfn_source` |
+| **Data Input** | Pre-extracted data from S3 | Calls `extract_all_data()` internally |
+| **Use Case** | Default mode with S3 staging | `--no-s3` mode, direct pipeline |
+| **Command** | `make run` | `make run-direct` |
+
+**Schema Differences:**
+
+| Resource | `main.py` | `pipeline_async.py` | Rationale |
+|----------|-----------|---------------------|-----------|
+| `countries` | `merge` | `replace` | S3 flow supports incremental updates |
+| `record_types` | `replace` | `replace` | Reference data, always refreshed |
+| `footprint_data` | `merge` | `merge` | Both support incremental loads |
+
+**Additional Fields in S3 Flow (`main.py`):**
+- `transformed_at`: Timestamp when data passed through S3 staging layer
+- Enables audit trail and replay from staged data
+
+**Code Reuse:**
+- `main.py` imports `extract_all_data()` from `pipeline_async.py` for extraction logic
+- Each file defines its own dlt resources to handle different data flow patterns
+- This intentional separation allows independent optimization of each architecture
+
 ---
 
 ## License

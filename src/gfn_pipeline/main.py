@@ -197,13 +197,16 @@ def gfn_s3_source(
     dlt source that reads from staged S3 data.
 
     Args:
-        data: Pre-extracted data dict with 'countries' and 'footprint_data'
+        data: Pre-extracted data dict with 'countries', 'record_types', and 'footprint_data'
         incremental_key: Column to use for incremental loading
         enable_contracts: Enable strict data contract enforcement
     """
     yield countries_resource(
         data.get("countries", []),
         enable_contracts=enable_contracts,
+    )
+    yield record_types_resource(
+        data.get("record_types", []),
     )
     yield footprint_data_resource(
         data.get("footprint_data", []),
@@ -242,6 +245,30 @@ def countries_resource(
             continue
 
         yield country
+
+
+# Record types column schema
+RECORD_TYPES_COLUMNS = {
+    "record_type": {"data_type": "text", "nullable": False},
+    "description": {"data_type": "text", "nullable": True},
+}
+
+
+@dlt.resource(
+    name="record_types",
+    write_disposition="replace",
+    primary_key=["record_type"],
+    columns=RECORD_TYPES_COLUMNS,
+)
+def record_types_resource(record_types: list[dict]) -> Iterator[dict]:
+    """
+    Record types reference data (dynamically discovered from API).
+
+    This creates a lookup table for all record types (e.g., BiocapTotGHA, CarbonBC, etc.)
+    with their descriptions.
+    """
+    logger.info(f"Processing {len(record_types)} record types")
+    yield from record_types
 
 
 @dlt.resource(
