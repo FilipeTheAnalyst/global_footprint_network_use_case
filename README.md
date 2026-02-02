@@ -30,7 +30,7 @@ A separate bonus exercise is available in `bonus_exercise/` showing how to compu
 
 Key files:
 - `bonus_exercise/sql_test.ipynb`: quick sanity checks to query the CSVs via `duckdb.sql(""" ... from data.csv ... """)`.
-- `bonus_exercise/.ipynb_checkpoints/weekly_returns_duckdb-checkpoint.ipynb`: full solution notebook draft (weekly return computation + business key discussion).
+- `bonus_exercise/weekly_returns_duckdb-checkpoint.ipynb`: full solution notebook draft (weekly return computation + business key discussion).
 - `bonus_exercise/resources/`: input CSVs used by the notebook.
 
 How to run (with `uv`):
