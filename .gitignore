@@ -60,3 +60,6 @@ localstack-data/
 .coverage
 htmlcov/
 .ruff_cache/
+
+# Resource files
+bonus_exercise/resources/
