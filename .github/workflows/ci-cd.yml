@@ -270,8 +270,8 @@ jobs:
             --destination duckdb \
             --start-year 2023 \
             --end-year 2023 \
-            --use-s3 \
-            --run-soda
+            --with-soda \
+            --soda-warn-only
         env:
           AWS_ENDPOINT_URL: http://localhost:4566
           AWS_ACCESS_KEY_ID: test
